@@ -44,8 +44,9 @@ policy:
 
   - id: FS-003
     claim: The guest's base image cannot be modified by the guest.
-    enforced_by: direct kernel boot from an initramfs held read-only on the host;
-                 any scratch disk is a per-run overlay
+    enforced_by: direct kernel boot with no block device of any kind; per-run
+                 files ride in as a second cpio concatenated onto the base
+                 initramfs, which is itself never rewritten
     verify: base image sha256 is identical before and after a run
     status: enforced
 
@@ -82,13 +83,24 @@ policy:
           that enabling it is a recorded decision rather than a default.
 
   - id: OUT-001
-    claim: The output channel carries bytes from guest to host only. The host
-           side of the channel is closed for writing at the kernel level.
-    enforced_by: receiver calls shutdown(SHUT_WR) on the accepted connection
-                 before reading any data
-    verify: attempt a write from the receiver process; the kernel must return
-            EPIPE. Guest must observe no readable bytes on the port.
+    claim: The output channel carries bytes from guest to host only. No host-side
+           descriptor exists through which a byte could reach the guest.
+    enforced_by: QEMU's pipe chardev is backed by a FIFO pair -- it writes guest
+                 output to iv.out and reads host input from iv.in. The launcher
+                 creates both (QEMU will not start otherwise) and nothing in
+                 Ironveil ever opens iv.in; the receiver opens only iv.out, and
+                 only O_RDONLY. With no writer, the guest's reads see EOF
+                 forever. Directionality is a property of which descriptors
+                 exist, so it survives a compromised receiver.
+    verify: guest reads the port and observes zero readable bytes; code audit
+            confirms iv.in is referenced only by mkfifo and that the receiver's
+            channel open call carries neither O_RDWR nor O_WRONLY
     status: enforced
+    note: An earlier design used a unix socket with shutdown(SHUT_WR). It is
+          incompatible with QEMU -- the socket chardev reads the resulting EOF
+          as a disconnect and tears the channel down. The FIFO pair gives a
+          strictly stronger property -- the absence of a descriptor rather
+          than a revoked one.
 
   - id: OUT-002
     claim: The output channel is not perfectly one-way. Flow control forms a

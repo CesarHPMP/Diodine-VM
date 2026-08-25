@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Ironveil host-side output receiver.
 
-Owns the unix socket that the guest's virtio-serial port is wired to, and
-copies framed bytes from the guest into a per-run quarantine directory.
+Holds the read end of the FIFO that the guest's virtio-serial port is wired
+to, and copies framed bytes from the guest into a per-run quarantine directory.
 
 Security properties this program is responsible for (see policy/policy.yaml):
 

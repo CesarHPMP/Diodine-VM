@@ -7,10 +7,12 @@
 # entire hardware attack surface.
 #
 # Ordering matters and is deliberate:
-#   1. Receiver starts first and owns the unix socket (the receiving side
-#      initiates, per FS-002/OUT-001).
-#   2. QEMU connects to it as a client, inside a cgroup scope with hard
-#      memory/CPU/pid caps.
+#   1. The launcher creates the FIFO pair, then starts the receiver, which
+#      opens the outbound FIFO O_RDONLY and holds it. The reader must be in
+#      place before QEMU opens the write end, or QEMU's non-blocking open
+#      fails with ENXIO (per FS-002/OUT-001).
+#   2. QEMU starts second and writes into that FIFO, inside a cgroup scope
+#      with hard memory/CPU/pid caps.
 #   3. A wall-clock deadline destroys the VM regardless of guest cooperation.
 #   4. Everything per-run is shredded on exit, on every path including signals.
 #
