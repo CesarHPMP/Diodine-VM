@@ -118,6 +118,7 @@ Known gaps, all recorded in `policy/policy.yaml`:
 
 ```
 ironveil.md              design document and threat model
+NEXT.md                  Phase 2 plan: workstreams, test rules, live-sample gate
 policy/policy.yaml       every claim, its enforcement point, its status
 policy/apparmor/         VMM confinement profile and installer
 bin/ironveil-run         hardened launcher; the QEMU args ARE the policy
