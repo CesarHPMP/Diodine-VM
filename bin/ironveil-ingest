@@ -1,0 +1,314 @@
+#!/usr/bin/env python3
+"""Ironveil quarantine ingest -- bounded, unprivileged artifact expansion.
+
+This is the stage that finally *parses* guest output, and it is therefore the
+most dangerous program in the project. Everything upstream of it was designed
+so that it never had to happen in the host kernel or with any privilege.
+
+Read this before trusting it:
+
+  * This program is a resource-safety control (ING-001) and a path-safety
+    control (ING-002). It is NOT a memory-safety boundary. Python's zipfile
+    and tarfile parse attacker-controlled input and have their own history of
+    vulnerabilities. Per the design document, the right long-term home for
+    this stage is a second disposable VM -- this implementation is the Phase 1
+    stopgap, hardened as far as an unprivileged host process can be.
+  * It refuses to run as root, writes nothing outside its destination, and
+    never executes anything it expands.
+
+Bounds enforced, all of them while streaming rather than after the fact:
+
+    --max-output-bytes   absolute cap on total expanded bytes
+    --max-ratio          expanded bytes / compressed bytes, per archive
+    --max-files          total number of extracted members
+    --max-depth          nested-archive recursion depth
+
+Any breach aborts the whole ingest and removes the partial output. A zip bomb
+should cost a few megabytes of writes and a nonzero exit, not a full disk.
+"""
+
+import argparse
+import gzip
+import io
+import os
+import shutil
+import sys
+import tarfile
+import zipfile
+
+CHUNK = 65536
+
+DEF_MAX_OUTPUT = 512 * 1024 * 1024
+DEF_MAX_RATIO = 100.0
+DEF_MAX_FILES = 10000
+DEF_MAX_DEPTH = 3
+
+ARCHIVE_MAGIC = (
+    (b"PK\x03\x04", "zip"),
+    (b"PK\x05\x06", "zip"),
+    (b"\x1f\x8b", "gz"),
+    (b"BZh", "tar"),
+    (b"\xfd7zXZ\x00", "tar"),
+    (b"ustar", "tar"),
+)
+
+
+class Bomb(Exception):
+    """A bound was breached. Always aborts the whole ingest."""
+
+
+class Budget:
+    """Global, shared across every nesting level. A bomb cannot buy more room
+    by hiding deeper in the tree."""
+
+    def __init__(self, max_bytes, max_files, max_ratio):
+        self.max_bytes = max_bytes
+        self.max_files = max_files
+        self.max_ratio = max_ratio
+        self.bytes_out = 0
+        self.files_out = 0
+
+    def charge_bytes(self, n):
+        self.bytes_out += n
+        if self.bytes_out > self.max_bytes:
+            raise Bomb(
+                f"expanded output exceeded cap: "
+                f"{self.bytes_out} > {self.max_bytes} bytes"
+            )
+
+    def charge_file(self):
+        self.files_out += 1
+        if self.files_out > self.max_files:
+            raise Bomb(f"expanded file count exceeded cap: {self.max_files}")
+
+    def check_ratio(self, produced, consumed, label):
+        if consumed <= 0:
+            return
+        ratio = produced / consumed
+        if ratio > self.max_ratio:
+            raise Bomb(
+                f"compression ratio {ratio:.1f}:1 exceeds cap "
+                f"{self.max_ratio:.1f}:1 in {label}"
+            )
+
+
+def log(msg):
+    print(f"[ingest] {msg}", file=sys.stderr, flush=True)
+
+
+def safe_member_path(name, dest):
+    """Resolve an archive member name under dest, or reject it (ING-002)."""
+    if not name or name in (".", ".."):
+        raise Bomb(f"illegal member name: {name!r}")
+    if name.startswith("/") or name.startswith("\\"):
+        raise Bomb(f"absolute path in archive: {name!r}")
+    if "\x00" in name:
+        raise Bomb(f"NUL byte in member name: {name!r}")
+    # Windows drive letters and UNC paths, which zip archives can carry.
+    if len(name) > 1 and name[1] == ":":
+        raise Bomb(f"drive-qualified path in archive: {name!r}")
+
+    normalized = os.path.normpath(name.replace("\\", "/"))
+    if normalized.startswith("..") or normalized.startswith("/"):
+        raise Bomb(f"path traversal in archive: {name!r}")
+
+    target = os.path.realpath(os.path.join(dest, normalized))
+    root = os.path.realpath(dest)
+    if target != root and not target.startswith(root + os.sep):
+        raise Bomb(f"member escapes destination: {name!r}")
+    return target
+
+
+def stream_out(src, target, budget, label):
+    """Copy a member to disk, charging the budget as bytes land, never after."""
+    os.makedirs(os.path.dirname(target), mode=0o700, exist_ok=True)
+    budget.charge_file()
+    written = 0
+    try:
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400)
+    except FileExistsError:
+        raise Bomb(f"duplicate member would overwrite: {label}")
+    try:
+        with os.fdopen(fd, "wb") as out:
+            while True:
+                chunk = src.read(CHUNK)
+                if not chunk:
+                    break
+                budget.charge_bytes(len(chunk))
+                out.write(chunk)
+                written += len(chunk)
+    except BaseException:
+        try:
+            os.unlink(target)
+        except OSError:
+            pass
+        raise
+    return written
+
+
+def sniff(path):
+    with open(path, "rb") as fh:
+        head = fh.read(512)
+    for magic, kind in ARCHIVE_MAGIC:
+        if magic == b"ustar":
+            if len(head) > 262 and head[257:262] == b"ustar":
+                return "tar"
+        elif head.startswith(magic):
+            return kind
+    return None
+
+
+def expand_zip(path, dest, budget, depth, args):
+    produced = 0
+    consumed = os.path.getsize(path)
+    with zipfile.ZipFile(path) as zf:
+        for info in zf.infolist():
+            name = info.filename
+            if name.endswith("/"):
+                continue  # directory entry; created on demand by stream_out
+            # zip has no symlink type of its own, but the unix mode field in
+            # external_attr carries one. Reject it rather than materialising it.
+            mode = info.external_attr >> 16
+            if mode and not (mode & 0o170000) in (0o100000, 0):
+                raise Bomb(f"non-regular member in zip: {name!r} (mode {mode:o})")
+            target = safe_member_path(name, dest)
+            with zf.open(info) as src:
+                produced += stream_out(src, target, budget, name)
+            budget.check_ratio(produced, consumed, os.path.basename(path))
+            maybe_recurse(target, dest, budget, depth, args)
+    return produced
+
+
+def expand_tar(path, dest, budget, depth, args):
+    produced = 0
+    consumed = os.path.getsize(path)
+    with tarfile.open(path, "r:*") as tf:
+        for member in tf:
+            if member.isdir():
+                continue
+            if not member.isreg():
+                raise Bomb(
+                    f"non-regular member in tar: {member.name!r} "
+                    f"(symlink/hardlink/device/fifo are refused)"
+                )
+            target = safe_member_path(member.name, dest)
+            src = tf.extractfile(member)
+            if src is None:
+                raise Bomb(f"unreadable member: {member.name!r}")
+            produced += stream_out(src, target, budget, member.name)
+            budget.check_ratio(produced, consumed, os.path.basename(path))
+            maybe_recurse(target, dest, budget, depth, args)
+    return produced
+
+
+def expand_gz(path, dest, budget, depth, args):
+    base = os.path.basename(path)
+    inner = base[:-3] if base.endswith(".gz") else base + ".out"
+    target = safe_member_path(inner, dest)
+    consumed = os.path.getsize(path)
+    with gzip.open(path, "rb") as src:
+        produced = stream_out(src, target, budget, inner)
+    budget.check_ratio(produced, consumed, base)
+    maybe_recurse(target, dest, budget, depth, args)
+    return produced
+
+
+def maybe_recurse(path, dest, budget, depth, args):
+    if depth >= args.max_depth:
+        return
+    kind = sniff(path)
+    if kind is None:
+        return
+    sub = os.path.join(dest, os.path.basename(path) + f".d{depth + 1}")
+    log(f"nested {kind} at depth {depth + 1}: {os.path.basename(path)}")
+    expand(path, sub, budget, depth + 1, args)
+
+
+def expand(path, dest, budget, depth, args):
+    kind = sniff(path)
+    if kind is None:
+        return 0
+    os.makedirs(dest, mode=0o700, exist_ok=True)
+    if kind == "zip":
+        return expand_zip(path, dest, budget, depth, args)
+    if kind == "tar":
+        return expand_tar(path, dest, budget, depth, args)
+    if kind == "gz":
+        # A .tar.gz sniffs as gz; let tarfile try it first, fall back to plain.
+        try:
+            return expand_tar(path, dest, budget, depth, args)
+        except tarfile.TarError:
+            return expand_gz(path, dest, budget, depth, args)
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Bounded expansion of quarantined artifacts"
+    )
+    ap.add_argument("source", help="quarantine file or directory to ingest")
+    ap.add_argument("dest", help="destination directory (must not exist)")
+    ap.add_argument("--max-output-bytes", type=int, default=DEF_MAX_OUTPUT)
+    ap.add_argument("--max-ratio", type=float, default=DEF_MAX_RATIO)
+    ap.add_argument("--max-files", type=int, default=DEF_MAX_FILES)
+    ap.add_argument("--max-depth", type=int, default=DEF_MAX_DEPTH)
+    args = ap.parse_args()
+
+    if os.geteuid() == 0:
+        log("refusing to run as root: this process parses hostile input")
+        return 2
+
+    if os.path.exists(args.dest):
+        log(f"destination already exists, refusing to merge into it: {args.dest}")
+        return 2
+
+    sources = []
+    if os.path.isdir(args.source):
+        for entry in sorted(os.listdir(args.source)):
+            if entry == "MANIFEST.json":
+                continue
+            full = os.path.join(args.source, entry)
+            if os.path.isfile(full) and not os.path.islink(full):
+                sources.append(full)
+    elif os.path.isfile(args.source) and not os.path.islink(args.source):
+        sources.append(args.source)
+    else:
+        log(f"not a regular file or directory: {args.source}")
+        return 2
+
+    budget = Budget(args.max_output_bytes, args.max_files, args.max_ratio)
+    os.makedirs(args.dest, mode=0o700)
+
+    try:
+        for src in sources:
+            kind = sniff(src)
+            if kind is None:
+                log(f"skipping non-archive: {os.path.basename(src)}")
+                continue
+            sub = os.path.join(args.dest, os.path.basename(src) + ".d0")
+            log(f"expanding {kind}: {os.path.basename(src)}")
+            expand(src, sub, budget, 0, args)
+    except Bomb as e:
+        log(f"REFUSED: {e}")
+        log(f"removing partial output: {args.dest}")
+        shutil.rmtree(args.dest, ignore_errors=True)
+        return 3
+    except (zipfile.BadZipFile, tarfile.TarError, gzip.BadGzipFile, EOFError) as e:
+        log(f"REFUSED: malformed archive: {e}")
+        shutil.rmtree(args.dest, ignore_errors=True)
+        return 3
+    except OSError as e:
+        log(f"REFUSED: filesystem error (disk full? quota?): {e}")
+        shutil.rmtree(args.dest, ignore_errors=True)
+        return 3
+
+    log(
+        f"ok: {budget.files_out} file(s), {budget.bytes_out} bytes "
+        f"(caps: {args.max_files} files, {args.max_output_bytes} bytes, "
+        f"{args.max_ratio:.0f}:1 ratio, depth {args.max_depth})"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

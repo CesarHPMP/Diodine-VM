@@ -1,0 +1,74 @@
+# Ironveil VMM confinement (VMM-002).
+#
+# A named profile -- it is NOT attached to the qemu binary path, so it applies
+# only to VMs launched via ironveil-run's aa-exec, and leaves any other QEMU on
+# this machine alone.
+#
+# This is a template. policy/apparmor/install substitutes @IRONVEIL_ROOT@ and
+# loads the result.
+#
+# STATUS: written against the Debian 13 / QEMU 10 layout and parser-checked,
+# but exercised only on this host. Treat a denial in dmesg as a bug in this
+# profile until proven otherwise, and re-check it after any QEMU upgrade:
+#     sudo dmesg -w | grep -i 'apparmor.*ironveil'
+
+abi <abi/4.0>,
+
+include <tunables/global>
+
+profile ironveil-qemu flags=(attach_disconnected) {
+  include <abstractions/base>
+
+  # NET-001/NET-002 as a second, independent enforcement point. The command
+  # line already omits every netdev; this makes the VMM process unable to open
+  # a socket even if a future edit reintroduces one by mistake.
+  deny network,
+
+  # The VMM has no business inspecting other processes.
+  deny ptrace,
+  deny signal send peer=unconfined,
+
+  # No capability is needed for an unprivileged, no-network, no-passthrough VM.
+  deny capability,
+
+  # --- the emulator itself -------------------------------------------------
+  /usr/bin/qemu-system-x86_64      mr,
+  /usr/bin/qemu-system-x86_64      ix,
+  /{usr/,}lib/**                   mr,
+  /usr/share/qemu/**               r,
+  /usr/share/seabios/**            r,
+  /usr/share/ipxe/**               r,
+  /usr/lib/ipxe/**                 r,
+
+  # --- virtualization ------------------------------------------------------
+  /dev/kvm                         rw,
+
+  # --- the base image: read-only, and only these two files (FS-003) --------
+  @IRONVEIL_ROOT@/image/base/vmlinuz    r,
+  @IRONVEIL_ROOT@/image/base/initramfs  r,
+
+  # --- per-run state: the assembled initrd and the output FIFO pair --------
+  owner /run/user/[0-9]*/ironveil/                 rw,
+  owner /run/user/[0-9]*/ironveil/**               rw,
+  owner /tmp/ironveil/**                           rw,
+
+  # --- the console log, write-only ----------------------------------------
+  # QEMU appends the guest console here. It is never read back by the guest.
+  owner @IRONVEIL_ROOT@/quarantine/**/console.log  w,
+
+  # --- host introspection QEMU needs to start ------------------------------
+  @{PROC}/@{pid}/task/@{tid}/comm       rw,
+  @{PROC}/@{pid}/status                 r,
+  @{PROC}/@{pid}/maps                   r,
+  @{PROC}/@{pid}/cmdline                r,
+  @{PROC}/sys/vm/overcommit_memory      r,
+  @{PROC}/sys/vm/max_map_count          r,
+  /sys/devices/system/cpu/**            r,
+  /sys/devices/system/node/**           r,
+  /sys/kernel/mm/transparent_hugepage/** r,
+  /dev/urandom                          r,
+  /dev/null                             rw,
+  /dev/ptmx                             rw,
+
+  # Everything not named above is denied by default.
+}

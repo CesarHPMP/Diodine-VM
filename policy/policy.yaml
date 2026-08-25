@@ -1,0 +1,201 @@
+# Ironveil Phase 1 — machine-readable policy.
+#
+# Every statement here is an assertion that Phase 2 adversarial tests must be
+# able to check. A test that does not map to a statement in this file is not
+# testing the policy; it is testing an assumption. Add the statement first.
+#
+# Fields:
+#   id          stable identifier, referenced by test names
+#   claim       what the system asserts
+#   enforced_by where the enforcement actually lives
+#   verify      how Phase 2 checks it
+#   status      enforced | partial | not-enforced | inherited
+
+version: 1
+phase: 1
+
+policy:
+
+  - id: NET-001
+    claim: The analysis VM has no network interface of any kind.
+    enforced_by: qemu -nic none; no netdev is defined on the command line
+    verify: guest enumerates /sys/class/net and finds only loopback
+    status: enforced
+
+  - id: NET-002
+    claim: The analysis VM cannot reach any third party on the internet.
+    enforced_by: NET-001 (no interface exists to route from)
+    verify: host observes zero packets attributable to the guest
+    status: enforced
+
+  - id: FS-001
+    claim: The guest has no shared-folder access to the host filesystem.
+    enforced_by: no -fsdev / -virtfs / virtiofsd on the command line
+    verify: guest finds no 9p or virtiofs filesystem type available
+    status: enforced
+
+  - id: FS-002
+    claim: The host never mounts, loop-mounts, or otherwise parses a filesystem
+           authored by the guest.
+    enforced_by: output channel is a byte stream; no block device crosses the
+                 boundary; ironveil-run never invokes mount
+    verify: audit the launcher and receiver for mount/losetup calls
+    status: enforced
+
+  - id: FS-003
+    claim: The guest's base image cannot be modified by the guest.
+    enforced_by: direct kernel boot from an initramfs held read-only on the host;
+                 any scratch disk is a per-run overlay
+    verify: base image sha256 is identical before and after a run
+    status: enforced
+
+  - id: DEV-001
+    claim: No USB controller or USB device is exposed to the guest.
+    enforced_by: qemu -nodefaults; no -usb / -device usb-* on the command line
+    verify: guest finds no USB host controller in /sys/bus/usb
+    status: enforced
+
+  - id: DEV-002
+    claim: No graphics adapter is exposed to the guest.
+    enforced_by: qemu -display none -vga none
+    verify: guest finds no DRM or framebuffer device
+    status: enforced
+
+  - id: DEV-003
+    claim: No host device is passed through to the guest.
+    enforced_by: no -device vfio-pci / -device usb-host on the command line
+    verify: guest PCI enumeration contains only the virtio devices we declared
+    status: enforced
+
+  - id: DEV-004
+    claim: No clipboard or console-sharing channel exists between guest and host.
+    enforced_by: no SPICE agent, no vdagent, no -display with clipboard support
+    verify: guest finds no vdagent virtserialport
+    status: enforced
+
+  - id: DEV-005
+    claim: The guest is given no source of host entropy by default.
+    enforced_by: virtio-rng is omitted unless --allow-rng is passed explicitly
+    verify: guest finds no /dev/hwrng backed by virtio-rng
+    status: enforced
+    note: This is a host-to-guest data path, however low-value. It is opt-in so
+          that enabling it is a recorded decision rather than a default.
+
+  - id: OUT-001
+    claim: The output channel carries bytes from guest to host only. The host
+           side of the channel is closed for writing at the kernel level.
+    enforced_by: receiver calls shutdown(SHUT_WR) on the accepted connection
+                 before reading any data
+    verify: attempt a write from the receiver process; the kernel must return
+            EPIPE. Guest must observe no readable bytes on the port.
+    status: enforced
+
+  - id: OUT-002
+    claim: The output channel is not perfectly one-way. Flow control forms a
+           low-bandwidth reverse channel.
+    enforced_by: nothing — this is a stated limitation, not a guarantee
+    verify: Phase 2 must MEASURE the achievable reverse bandwidth rather than
+            assume it is zero
+    status: not-enforced
+
+  - id: OUT-003
+    claim: The receiver never parses artifact content.
+    enforced_by: receiver reads a fixed-size header and copies N bytes; it does
+                 not decompress, decode, or inspect payloads
+    verify: code audit; receiver imports no archive or media library
+    status: enforced
+
+  - id: RES-001
+    claim: Guest memory is capped and never reaches host swap.
+    enforced_by: systemd-run --user --scope -p MemoryMax -p MemorySwapMax=0
+    verify: read memory.max and memory.swap.max from the run's cgroup
+    status: enforced
+
+  - id: RES-002
+    claim: Guest CPU consumption is capped.
+    enforced_by: systemd-run --user --scope -p CPUQuota
+    verify: read cpu.max from the run's cgroup
+    status: enforced
+
+  - id: RES-003
+    claim: Guest process count is capped.
+    enforced_by: systemd-run --user --scope -p TasksMax
+    verify: read pids.max from the run's cgroup
+    status: enforced
+
+  - id: RES-004
+    claim: Guest disk I/O bandwidth is capped.
+    enforced_by: nothing yet
+    verify: read io.max from the run's cgroup
+    status: not-enforced
+    note: The io controller is not delegated to the user slice on this host, so
+          IOReadBandwidthMax cannot be set from an unprivileged scope. Closing
+          this requires either a system-slice scope or a delegated io controller.
+
+  - id: RES-005
+    claim: A run cannot exceed its wall-clock budget.
+    enforced_by: launcher enforces a deadline and destroys the VM on expiry
+    verify: a guest that spins forever is killed at the deadline
+    status: enforced
+
+  - id: RES-006
+    claim: Total exported bytes, per-artifact bytes, and artifact count are all
+           bounded, and are enforced on the host side of the boundary.
+    enforced_by: receiver enforces caps while streaming, before writing to disk
+    verify: a guest that emits an oversized artifact is cut off mid-stream and
+            the partial file is removed
+    status: enforced
+
+  - id: ING-001
+    claim: Decompression of exported archives is bounded by ratio, absolute
+           output size, file count, and nesting depth.
+    enforced_by: ironveil-ingest; it never calls extractall
+    verify: a zip bomb is refused without exhausting storage
+    status: enforced
+
+  - id: ING-002
+    claim: Ingest cannot write outside its destination directory.
+    enforced_by: ironveil-ingest rejects absolute paths, traversal, symlinks,
+                 hardlinks, and non-regular members
+    verify: an archive containing ../../etc/passwd and a symlink member is refused
+    status: enforced
+
+  - id: QUAR-001
+    claim: Quarantine storage is excluded from automatic consumers (indexers,
+           thumbnailers, antivirus, backup).
+    enforced_by: exclusion markers written into the quarantine root
+    verify: markers present; consumer configuration reviewed per host
+    status: partial
+    note: Markers are advisory. Any consumer that ignores them must be
+          configured out of band. This is a host-configuration property that
+          Ironveil can request but not enforce.
+
+  - id: VMM-001
+    claim: The VMM process runs unprivileged and under a seccomp sandbox.
+    enforced_by: no sudo anywhere in the launcher; qemu -sandbox on with
+                 obsolete/elevateprivileges/spawn/resourcecontrol all denied
+    verify: inspect the qemu process uid and its seccomp status in /proc
+    status: enforced
+
+  - id: VMM-002
+    claim: The VMM process is confined by mandatory access control.
+    enforced_by: AppArmor profile ironveil-qemu, applied via aa-exec
+    verify: /proc/<pid>/attr/current names the ironveil-qemu profile
+    status: partial
+    note: Requires the profile to be loaded once with root. The launcher warns
+          and continues if it is absent, so this degrades rather than blocks.
+
+  - id: TCB-001
+    claim: No root-privileged daemon is introduced into the trusted computing
+           base by Ironveil itself.
+    enforced_by: direct QEMU invocation; no libvirtd
+    verify: no Ironveil component runs as uid 0
+    status: enforced
+
+  - id: PLAT-001
+    claim: Microarchitectural side channels are out of scope and inherited from
+           the platform.
+    enforced_by: nothing — platform responsibility
+    verify: not verified by Ironveil; see the microarchitectural section of the
+            design document
+    status: inherited

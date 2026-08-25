@@ -1,0 +1,128 @@
+#!/bin/sh
+# Ironveil guest init -- PID 1 inside the disposable analysis VM.
+#
+# The guest is RAM-only: this initramfs IS the root filesystem, there is no
+# block device, and nothing here survives poweroff. Everything this script
+# does happens inside the hostile trust domain and is therefore convenience,
+# not security. The host does not trust any of it.
+#
+# Lifecycle:
+#     mount pseudo-filesystems
+#     run /ironveil/payload/run under a timeout
+#     emit everything in /ironveil/out through the output port
+#     power off
+#
+# init must never return -- that panics the kernel -- so every path ends in
+# poweroff.
+set -u
+
+PORT=/dev/virtio-ports/org.ironveil.out
+OUTDIR=/ironveil/out
+PAYLOAD=/ironveil/payload/run
+
+log() { echo "[ironveil-guest] $*" > /dev/console 2>/dev/null; }
+
+poweroff_now() {
+    log "powering off"
+    sync
+    # Try the polite route, then the reliable one. QEMU exits either way.
+    poweroff -f 2>/dev/null
+    sleep 2
+    echo o > /proc/sysrq-trigger 2>/dev/null
+    sleep 2
+    # If we are still here, halt hard rather than returning from init.
+    reboot -f 2>/dev/null
+    while :; do sleep 3600; done
+}
+
+
+# --- pseudo-filesystems -----------------------------------------------------
+mount -t proc     none /proc  2>/dev/null
+mount -t sysfs    none /sys   2>/dev/null
+mount -t devtmpfs none /dev   2>/dev/null || mount -t tmpfs none /dev 2>/dev/null
+mount -t tmpfs    none /tmp   2>/dev/null
+mount -t tmpfs    none /run   2>/dev/null
+
+# devtmpfs gives us a real console; reattach stdio to it now that it exists.
+exec > /dev/console 2>&1 < /dev/null
+
+log "kernel $(uname -r) up"
+
+kparam() {  # kparam NAME DEFAULT -- read ironveil.NAME= from the kernel cmdline
+    _v=$(sed -n "s/.*ironveil\.$1=\([^ ]*\).*/\1/p" /proc/cmdline)
+    [ -n "$_v" ] && echo "$_v" || echo "$2"
+}
+
+PAYLOAD_TIMEOUT=$(kparam payload_timeout 120)
+
+# --- locate the output port -------------------------------------------------
+# /dev/virtio-ports/<name> is a udev symlink and there is no udev here, so
+# resolve the friendly name through sysfs to the devtmpfs node the kernel
+# actually created (/dev/vportNpM), then recreate the convenience symlink for
+# payloads that expect the usual path.
+find_port() {
+    for _d in /sys/class/virtio-ports/*; do
+        [ -r "$_d/name" ] || continue
+        if [ "$(cat "$_d/name" 2>/dev/null)" = "org.ironveil.out" ]; then
+            echo "/dev/$(basename "$_d")"
+            return 0
+        fi
+    done
+    return 1
+}
+
+if RESOLVED=$(find_port); then
+    mkdir -p /dev/virtio-ports
+    ln -sf "$RESOLVED" "$PORT" 2>/dev/null
+    [ -e "$PORT" ] || PORT="$RESOLVED"
+    log "output port: $RESOLVED (as $PORT)"
+else
+    log "FATAL: no virtio port named org.ironveil.out"
+    log "virtio-ports present: $(ls /sys/class/virtio-ports 2>/dev/null | tr '\n' ' ')"
+    log "char devices: $(ls /dev/vport* 2>/dev/null | tr '\n' ' ')"
+    poweroff_now 1
+fi
+
+mkdir -p "$OUTDIR"
+
+# --- payload ----------------------------------------------------------------
+rc=0
+if [ -x "$PAYLOAD" ]; then
+    log "running payload (timeout ${PAYLOAD_TIMEOUT}s)"
+    timeout "$PAYLOAD_TIMEOUT" "$PAYLOAD" || rc=$?
+    if [ "$rc" -eq 143 ] || [ "$rc" -eq 124 ]; then
+        log "payload hit its timeout and was killed"
+    elif [ "$rc" -ne 0 ]; then
+        log "payload exited $rc"
+    else
+        log "payload completed"
+    fi
+else
+    log "no executable payload at $PAYLOAD"
+    rc=127
+fi
+
+echo "$rc" > "$OUTDIR/payload.rc" 2>/dev/null
+
+# --- export -----------------------------------------------------------------
+# Only top-level regular files are exported. A payload that wants directory
+# structure should produce its own archive; the host's ingest stage is what
+# expands archives, under bounds this VM does not get to influence.
+set --
+for f in "$OUTDIR"/*; do
+    [ -f "$f" ] || continue
+    set -- "$@" "$f"
+done
+
+if [ "$#" -eq 0 ]; then
+    log "no artifacts to export"
+else
+    log "exporting $# artifact(s)"
+    IRONVEIL_PORT="$PORT" /usr/local/bin/ironveil-send "$@" \
+        || log "export failed (receiver may have enforced a cap)"
+fi
+
+# Closing the port is what tells the receiver the stream is complete.
+sync
+
+poweroff_now 0

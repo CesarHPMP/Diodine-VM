@@ -1,0 +1,198 @@
+#!/bin/bash
+# Build the Ironveil disposable guest base image.
+#
+# Produces two immutable artifacts in image/base/:
+#     vmlinuz      Alpine linux-virt kernel
+#     initramfs    Alpine minirootfs + the Ironveil guest agent, as cpio.gz
+#
+# Design notes:
+#
+#  * The guest is RAM-only. There is no root disk, no overlay, and no block
+#    device of any kind -- the entire userland lives in the initramfs. This is
+#    the strongest possible form of FS-003 ("the guest cannot modify its base
+#    image"): the base is never writable because it is never mounted.
+#
+#  * virtio-console and virtio-pci are compiled into the Alpine virt kernel
+#    (CONFIG_VIRTIO_CONSOLE=y, CONFIG_VIRTIO_PCI=y), so the output channel
+#    needs no kernel modules. The build verifies this rather than assuming it.
+#
+#  * Per-run payloads and samples are NOT baked in here. ironveil-run appends
+#    them as a second cpio archive at launch time, so this base image is built
+#    once and is byte-identical across every run.
+#
+#  * Downloads are checksum-verified against Alpine's signed release manifest
+#    where one exists, and pinned in image/base/IMAGE.lock on first build so
+#    that later rebuilds are checked against what was used before.
+#
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
+BUILD="$HERE/build"
+OUT="$HERE/base"
+LOCK="$OUT/IMAGE.lock"
+
+MIRROR="https://dl-cdn.alpinelinux.org/alpine"
+BRANCH="v3.24"
+RELEASES="$MIRROR/latest-stable/releases/x86_64"
+
+say()  { printf '\033[1m[build]\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[1;31m[build] error:\033[0m %s\n' "$*" >&2; exit 1; }
+
+need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
+for t in curl tar cpio gzip awk sha256sum find sort; do need "$t"; done
+
+mkdir -p "$BUILD" "$OUT"
+
+# ---------------------------------------------------------------- downloads --
+
+say "resolving current Alpine release"
+curl -sSf --max-time 60 -o "$BUILD/latest-releases.yaml" \
+    "$RELEASES/latest-releases.yaml" || die "cannot reach $RELEASES"
+
+# Pull the minirootfs filename and its published sha256 out of the manifest.
+read -r MINIROOT_FILE MINIROOT_SHA < <(
+    awk '
+        /flavor: alpine-minirootfs/ { inblock=1 }
+        inblock && /file:/   { f=$2 }
+        inblock && /sha256:/ { print f, $2; exit }
+    ' "$BUILD/latest-releases.yaml"
+)
+[ -n "${MINIROOT_FILE:-}" ] || die "could not parse minirootfs from release manifest"
+say "minirootfs: $MINIROOT_FILE"
+
+fetch() {  # fetch URL DEST
+    local url=$1 dest=$2
+    if [ -f "$dest" ]; then say "cached: $(basename "$dest")"; return; fi
+    say "downloading $(basename "$dest")"
+    curl -sSf --max-time 900 -o "$dest.part" "$url" || die "download failed: $url"
+    mv "$dest.part" "$dest"
+}
+
+verify_sha() {  # verify_sha FILE EXPECTED LABEL
+    local got; got=$(sha256sum "$1" | cut -d' ' -f1)
+    [ "$got" = "$2" ] || die "sha256 mismatch for $3
+  expected $2
+  got      $got"
+    say "sha256 verified: $3"
+}
+
+fetch "$RELEASES/$MINIROOT_FILE" "$BUILD/$MINIROOT_FILE"
+verify_sha "$BUILD/$MINIROOT_FILE" "$MINIROOT_SHA" "$MINIROOT_FILE"
+
+say "resolving linux-virt package version"
+fetch "$MIRROR/$BRANCH/main/x86_64/APKINDEX.tar.gz" "$BUILD/APKINDEX.tar.gz"
+tar xzf "$BUILD/APKINDEX.tar.gz" -C "$BUILD" APKINDEX
+KVER=$(grep -A25 '^P:linux-virt$' "$BUILD/APKINDEX" | grep -m1 '^V:' | cut -d: -f2)
+[ -n "$KVER" ] || die "could not resolve linux-virt version from APKINDEX"
+say "linux-virt: $KVER"
+
+KAPK="linux-virt-$KVER.apk"
+fetch "$MIRROR/$BRANCH/main/x86_64/$KAPK" "$BUILD/$KAPK"
+KAPK_SHA=$(sha256sum "$BUILD/$KAPK" | cut -d' ' -f1)
+
+# ------------------------------------------------------------------ kernel ---
+
+say "extracting kernel"
+rm -rf "$BUILD/kernel"; mkdir -p "$BUILD/kernel"
+# .apk files are gzip tar streams with a signature member prepended; tar warns
+# about the trailing sections but extracts the payload correctly.
+tar xzf "$BUILD/$KAPK" -C "$BUILD/kernel" --no-same-owner 2>/dev/null || true
+
+KIMG=$(find "$BUILD/kernel/boot" -maxdepth 1 -name 'vmlinuz*' -type f | head -1)
+[ -n "$KIMG" ] || die "no vmlinuz found inside $KAPK"
+KCFG=$(find "$BUILD/kernel/boot" -maxdepth 1 -name 'config-*' -type f | head -1)
+
+# The whole output channel depends on these being built in, not modular --
+# there are no modules in this initramfs to load.
+if [ -n "$KCFG" ]; then
+    for opt in VIRTIO_CONSOLE VIRTIO_PCI DEVTMPFS; do
+        grep -q "^CONFIG_$opt=y" "$KCFG" \
+            || die "kernel lacks CONFIG_$opt=y; the RAM-only design needs it built in"
+    done
+    say "kernel config verified: VIRTIO_CONSOLE, VIRTIO_PCI, DEVTMPFS built in"
+fi
+
+# --------------------------------------------------------------- initramfs ---
+
+say "assembling initramfs root"
+ROOTFS="$BUILD/rootfs"
+rm -rf "$ROOTFS"; mkdir -p "$ROOTFS"
+tar xzf "$BUILD/$MINIROOT_FILE" -C "$ROOTFS" --no-same-owner 2>/dev/null
+
+mkdir -p "$ROOTFS/ironveil/out" "$ROOTFS/ironveil/payload" "$ROOTFS/ironveil/sample"
+mkdir -p "$ROOTFS/proc" "$ROOTFS/sys" "$ROOTFS/dev" "$ROOTFS/tmp" "$ROOTFS/run"
+
+install -m 0755 "$ROOT/guest/ironveil-send" "$ROOTFS/usr/local/bin/ironveil-send"
+install -m 0755 "$ROOT/guest/init"          "$ROOTFS/init"
+
+# A default payload, used when the operator supplies none. It proves the
+# channel end to end and nothing else.
+cat > "$ROOTFS/ironveil/payload/run" <<'DEFAULT'
+#!/bin/sh
+# Default Ironveil payload: emit a short environment report and exit.
+# Replace with your own via: ironveil-run --payload ./my-payload.sh
+set -eu
+{
+    echo "ironveil default payload"
+    echo "kernel:    $(uname -srm)"
+    echo "uptime:    $(cat /proc/uptime)"
+    echo "memory:    $(awk '/MemTotal/{print $2" kB"}' /proc/meminfo)"
+    echo "cpus:      $(grep -c ^processor /proc/cpuinfo)"
+    echo "netifs:    $(ls /sys/class/net 2>/dev/null | tr '\n' ' ')"
+    echo "block:     $(ls /sys/block 2>/dev/null | tr '\n' ' ')"
+    echo "usb:       $(ls /sys/bus/usb/devices 2>/dev/null | tr '\n' ' ')"
+    echo "drm:       $(ls /sys/class/drm 2>/dev/null | tr '\n' ' ')"
+    echo "hwrng:     $(cat /sys/class/misc/hw_random/rng_current 2>/dev/null || echo none)"
+    echo "pci:       $(ls /sys/bus/pci/devices 2>/dev/null | wc -l) device(s)"
+} > /ironveil/out/environment.txt
+DEFAULT
+chmod 0755 "$ROOTFS/ironveil/payload/run"
+
+say "packing initramfs"
+# -R 0:0 forces root ownership regardless of the building user, so the image
+# does not depend on who ran this script.
+( cd "$ROOTFS" && find . -print0 \
+    | sort -z \
+    | cpio --null -o -H newc -R 0:0 --quiet ) \
+    | gzip -9 > "$BUILD/initramfs.gz"
+
+# ------------------------------------------------------------------ install --
+
+rm -f "$OUT/vmlinuz" "$OUT/initramfs"
+install -m 0444 "$KIMG" "$OUT/vmlinuz"
+install -m 0444 "$BUILD/initramfs.gz" "$OUT/initramfs"
+
+VMLINUZ_SHA=$(sha256sum "$OUT/vmlinuz"   | cut -d' ' -f1)
+INITRD_SHA=$( sha256sum "$OUT/initramfs" | cut -d' ' -f1)
+
+if [ -f "$LOCK" ]; then
+    say "checking against existing IMAGE.lock"
+    prev_k=$(awk -F'= *' '/^vmlinuz_sha256/{print $2}' "$LOCK" || true)
+    if [ -n "$prev_k" ] && [ "$prev_k" != "$VMLINUZ_SHA" ]; then
+        say "NOTE: kernel changed since last build (upstream released a new one)"
+        say "      was $prev_k"
+        say "      now $VMLINUZ_SHA"
+    fi
+fi
+
+rm -f "$LOCK"
+cat > "$LOCK" <<LOCKEOF
+# Ironveil base image lock -- generated by image/build-base-image
+# Rebuilds are compared against these values.
+built_utc          = $(date -u +%Y-%m-%dT%H:%M:%SZ)
+alpine_branch      = $BRANCH
+minirootfs_file    = $MINIROOT_FILE
+minirootfs_sha256  = $MINIROOT_SHA
+linux_virt_version = $KVER
+linux_virt_sha256  = $KAPK_SHA
+vmlinuz_sha256     = $VMLINUZ_SHA
+initramfs_sha256   = $INITRD_SHA
+LOCKEOF
+chmod 0444 "$LOCK"
+
+say "done"
+printf '\n'
+ls -lh "$OUT"
+printf '\n'
+cat "$LOCK"

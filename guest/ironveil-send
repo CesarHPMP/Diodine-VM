@@ -1,0 +1,92 @@
+#!/bin/sh
+# ironveil-send -- guest-side artifact emitter.
+#
+# Writes length-prefixed frames to the virtio-serial output port. This is the
+# ONLY sanctioned way for anything in the analysis VM to move bytes across the
+# boundary.
+#
+# This script is inside the hostile trust domain. Nothing it does is a security
+# control -- a compromised guest can simply write to the port directly. The
+# validation here exists to catch honest mistakes early, so that a malformed
+# frame is diagnosed in the guest rather than aborting the whole run at the
+# receiver. The receiver is the authority on every limit.
+#
+# Frame (big-endian, no padding):
+#     "IVF1" | uint16 name_len | uint64 size | name | payload
+#
+# Usage:
+#     ironveil-send FILE [FILE...]
+#     ironveil-send -n NAME -    # read payload from stdin, send under NAME
+#
+set -eu
+
+PORT="${IRONVEIL_PORT:-/dev/virtio-ports/org.ironveil.out}"
+MAGIC='IVF1'
+
+die() { echo "ironveil-send: $*" >&2; exit 1; }
+
+# Emit $1 as $2 big-endian bytes, using printf %b so the octal escapes are
+# interpreted without the value ever being treated as a format string.
+be_bytes() {
+    _v=$1; _n=$2; _out=''; _i=0
+    while [ "$_i" -lt "$_n" ]; do
+        _sh=$(( (_n - 1 - _i) * 8 ))
+        _b=$(( (_v >> _sh) & 255 ))
+        _out="${_out}\\$(printf '%03o' "$_b")"
+        _i=$(( _i + 1 ))
+    done
+    printf '%b' "$_out"
+}
+
+check_name() {
+    case $1 in
+        ''|.|..)                die "illegal artifact name: '$1'" ;;
+        */*)                    die "artifact name must not contain '/': '$1'" ;;
+        .*)                     die "artifact name must not start with '.': '$1'" ;;
+        *[!A-Za-z0-9._-]*)      die "artifact name has illegal characters: '$1'" ;;
+    esac
+    [ "${#1}" -le 255 ] || die "artifact name longer than 255 bytes: '$1'"
+}
+
+send_frame() {
+    # send_frame NAME SIZE  -- payload is streamed from stdin
+    _name=$1; _size=$2
+    check_name "$_name"
+    printf '%s' "$MAGIC"
+    be_bytes "${#_name}" 2
+    be_bytes "$_size" 8
+    printf '%s' "$_name"
+    cat
+}
+
+[ -w "$PORT" ] || die "output port not writable: $PORT (is virtio-serial attached?)"
+
+# One open for the whole session: frames must land back-to-back on a single
+# stream, and closing the port is what signals end-of-stream to the receiver.
+exec 3>"$PORT"
+
+if [ "${1:-}" = "-n" ]; then
+    [ $# -ge 3 ] || die "usage: ironveil-send -n NAME -"
+    name=$2
+    [ "$3" = "-" ] || die "with -n the source must be '-' (stdin)"
+    tmp=$(mktemp)
+    trap 'rm -f "$tmp"' EXIT
+    cat > "$tmp"
+    size=$(wc -c < "$tmp" | tr -d ' ')
+    send_frame "$name" "$size" < "$tmp" >&3
+    echo "ironveil-send: sent $name ($size bytes)" >&2
+    exit 0
+fi
+
+[ $# -ge 1 ] || die "usage: ironveil-send FILE [FILE...]"
+
+for f in "$@"; do
+    [ -f "$f" ] || die "not a regular file: $f"
+    [ -r "$f" ] || die "not readable: $f"
+    name=$(basename "$f")
+    size=$(wc -c < "$f" | tr -d ' ')
+    send_frame "$name" "$size" < "$f" >&3
+    echo "ironveil-send: sent $name ($size bytes)" >&2
+done
+
+exec 3>&-

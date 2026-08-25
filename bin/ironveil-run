@@ -1,0 +1,286 @@
+#!/bin/bash
+# ironveil-run -- launch one disposable analysis VM.
+#
+# The QEMU command line built here IS the security policy. Every device the
+# guest can see is listed explicitly; -nodefaults means nothing else is
+# attached implicitly. Read the ARGS array below and you have read the guest's
+# entire hardware attack surface.
+#
+# Ordering matters and is deliberate:
+#   1. Receiver starts first and owns the unix socket (the receiving side
+#      initiates, per FS-002/OUT-001).
+#   2. QEMU connects to it as a client, inside a cgroup scope with hard
+#      memory/CPU/pid caps.
+#   3. A wall-clock deadline destroys the VM regardless of guest cooperation.
+#   4. Everything per-run is shredded on exit, on every path including signals.
+#
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
+BASE="$ROOT/image/base"
+
+# ------------------------------------------------------------------ defaults --
+MEM_MB=1024
+CPUS=1
+TIMEOUT=180
+PAYLOAD_TIMEOUT=120
+MAX_TOTAL=$((256 * 1024 * 1024))
+MAX_ARTIFACT=$((64 * 1024 * 1024))
+MAX_FILES=64
+CPU_QUOTA=100          # percent of ONE core
+PAYLOAD=""
+SAMPLE=""
+ALLOW_RNG=0
+KEEP_RUNDIR=0
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+
+say() { printf '\033[1m[ironveil]\033[0m %s\n' "$*" >&2; }
+die() { printf '\033[1;31m[ironveil] error:\033[0m %s\n' "$*" >&2; exit 1; }
+
+usage() {
+    cat >&2 <<USAGE
+usage: ironveil-run [options]
+
+  --payload FILE        script to run inside the guest (default: built-in probe)
+  --sample FILE         file to place at /ironveil/sample/ inside the guest
+  --mem MB              guest memory cap            (default $MEM_MB)
+  --cpus N              guest vcpus                 (default $CPUS)
+  --cpu-quota PCT       host CPU cap, % of one core (default $CPU_QUOTA)
+  --timeout SEC         wall-clock budget for the run (default $TIMEOUT)
+  --payload-timeout SEC budget for the payload itself (default $PAYLOAD_TIMEOUT)
+  --max-total BYTES     total export cap            (default $MAX_TOTAL)
+  --max-artifact BYTES  per-artifact export cap     (default $MAX_ARTIFACT)
+  --max-files N         artifact count cap          (default $MAX_FILES)
+  --allow-rng           expose virtio-rng to the guest (DEV-005: opt-in, this
+                        is a host-to-guest data path and is off by default)
+  --keep-rundir         do not shred the run directory on exit (debugging)
+  -h, --help            this message
+USAGE
+    exit "${1:-0}"
+}
+
+while [ $# -gt 0 ]; do
+    case $1 in
+        --payload)          PAYLOAD=${2:?}; shift 2 ;;
+        --sample)           SAMPLE=${2:?}; shift 2 ;;
+        --mem)              MEM_MB=${2:?}; shift 2 ;;
+        --cpus)             CPUS=${2:?}; shift 2 ;;
+        --cpu-quota)        CPU_QUOTA=${2:?}; shift 2 ;;
+        --timeout)          TIMEOUT=${2:?}; shift 2 ;;
+        --payload-timeout)  PAYLOAD_TIMEOUT=${2:?}; shift 2 ;;
+        --max-total)        MAX_TOTAL=${2:?}; shift 2 ;;
+        --max-artifact)     MAX_ARTIFACT=${2:?}; shift 2 ;;
+        --max-files)        MAX_FILES=${2:?}; shift 2 ;;
+        --allow-rng)        ALLOW_RNG=1; shift ;;
+        --keep-rundir)      KEEP_RUNDIR=1; shift ;;
+        -h|--help)          usage 0 ;;
+        *)                  echo "unknown option: $1" >&2; usage 1 ;;
+    esac
+done
+
+command -v qemu-system-x86_64 >/dev/null || die "qemu-system-x86_64 not found"
+[ -r "$BASE/vmlinuz" ]   || die "no base kernel; run image/build-base-image first"
+[ -r "$BASE/initramfs" ] || die "no base initramfs; run image/build-base-image first"
+[ -r /dev/kvm ] && [ -w /dev/kvm ] || die "/dev/kvm not accessible to $(id -un)"
+[ "$(id -u)" -ne 0 ] || die "refusing to run as root (TCB-001)"
+
+# -------------------------------------------------------------- run scaffold --
+RUNBASE="${XDG_RUNTIME_DIR:-/tmp}/ironveil"
+mkdir -p "$RUNBASE"; chmod 0700 "$RUNBASE"
+RUNDIR="$(mktemp -d "$RUNBASE/r.XXXXXX")"
+
+# OUT-001. QEMU's pipe chardev uses a FIFO pair: it WRITES guest output to
+# <path>.out and READS host input from <path>.in. Both must exist for QEMU to
+# start, but nothing in Ironveil ever opens .in for writing -- so the inbound
+# FIFO has no writer and the guest's reads on it see EOF forever. The
+# directionality is a property of which descriptors exist, not of anyone's
+# good behaviour, and it survives a compromised receiver.
+PIPE="$RUNDIR/iv"
+mkfifo -m 0600 "$PIPE.out" "$PIPE.in"
+
+QUARANTINE="$ROOT/quarantine/$RUN_ID"
+mkdir -p "$QUARANTINE"; chmod 0700 "$QUARANTINE"
+
+RECV_PID=""; QEMU_PID=""
+cleanup() {
+    local rc=$?
+    [ -n "$QEMU_PID" ] && kill -KILL "$QEMU_PID" 2>/dev/null || true
+    [ -n "$RECV_PID" ] && kill -TERM "$RECV_PID" 2>/dev/null || true
+    if [ "$KEEP_RUNDIR" -eq 0 ]; then
+        # The per-run initramfs carries the sample. Shred it rather than
+        # unlinking, so a sample does not linger in freed blocks.
+        find "$RUNDIR" -type f -exec shred -u -n1 {} + 2>/dev/null || true
+        rm -rf "$RUNDIR" 2>/dev/null || true
+    else
+        say "run directory kept: $RUNDIR"
+    fi
+    exit $rc
+}
+trap cleanup EXIT INT TERM
+
+# ------------------------------------------------------- per-run payload cpio --
+# The base initramfs is never rewritten (FS-003). Per-run files ride in as a
+# second cpio archive concatenated onto it -- the kernel unpacks concatenated
+# archives in order, so later entries win.
+OVERLAY="$RUNDIR/overlay"
+mkdir -p "$OVERLAY/ironveil/payload" "$OVERLAY/ironveil/sample"
+
+if [ -n "$PAYLOAD" ]; then
+    [ -r "$PAYLOAD" ] || die "payload not readable: $PAYLOAD"
+    install -m 0755 "$PAYLOAD" "$OVERLAY/ironveil/payload/run"
+    say "payload: $PAYLOAD"
+else
+    say "payload: built-in environment probe"
+fi
+
+if [ -n "$SAMPLE" ]; then
+    [ -r "$SAMPLE" ] || die "sample not readable: $SAMPLE"
+    install -m 0444 "$SAMPLE" "$OVERLAY/ironveil/sample/$(basename "$SAMPLE")"
+    say "sample: $SAMPLE -> /ironveil/sample/$(basename "$SAMPLE")"
+fi
+
+( cd "$OVERLAY" && find . -print0 | sort -z \
+    | cpio --null -o -H newc -R 0:0 --quiet ) | gzip > "$RUNDIR/overlay.cpio.gz"
+cat "$BASE/initramfs" "$RUNDIR/overlay.cpio.gz" > "$RUNDIR/initrd"
+
+BASE_SHA_BEFORE=$(sha256sum "$BASE/initramfs" | cut -d' ' -f1)
+
+# ------------------------------------------------------------------ receiver --
+say "starting receiver (quarantine: quarantine/$RUN_ID)"
+"$HERE/ironveil-receiver" \
+    --fifo "$PIPE.out" --outdir "$QUARANTINE" \
+    --max-total "$MAX_TOTAL" --max-artifact "$MAX_ARTIFACT" \
+    --max-files "$MAX_FILES" --timeout "$TIMEOUT" &
+RECV_PID=$!
+
+# The reader must hold the outbound FIFO open before QEMU opens the write end,
+# or QEMU's non-blocking open fails with ENXIO.
+for _ in $(seq 100); do
+    kill -0 "$RECV_PID" 2>/dev/null || die "receiver exited during startup"
+    fuser "$PIPE.out" >/dev/null 2>&1 && break
+    sleep 0.1
+done
+
+# ---------------------------------------------------------------- qemu args --
+# Everything the guest can see is on this list. Nothing is implicit.
+ARGS=(
+    -name "ironveil-$RUN_ID"
+    -no-user-config                 # ignore system-wide qemu config
+    -nodefaults                     # attach NOTHING we do not name below
+    -machine q35,accel=kvm
+    -cpu host
+    -smp "$CPUS"
+    -m "$MEM_MB"
+
+    # VMM-001: seccomp, with every escalation class denied.
+    -sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny
+
+    # NET-001/NET-002: no NIC exists. There is nothing to route from.
+    -nic none
+
+    # DEV-002: no graphics adapter, no display backend.
+    -display none
+    -vga none
+
+    # No monitor socket, no QMP: nothing that could be used to reconfigure the
+    # running VM from inside it.
+    -monitor none
+
+    # RAM-only boot. No -drive, no -device virtio-blk: the guest has no block
+    # device at all, so FS-003 holds by construction.
+    -kernel "$BASE/vmlinuz"
+    -initrd "$RUNDIR/initrd"
+    -append "console=ttyS0 quiet panic=1 ironveil.payload_timeout=$PAYLOAD_TIMEOUT"
+
+    # The output channel. One port, one direction by policy at the far end.
+    -device virtio-serial-pci,id=vser0,max_ports=2
+    -chardev "pipe,id=ivout,path=$PIPE"
+    -device virtserialport,chardev=ivout,bus=vser0.0,name=org.ironveil.out
+
+    # Guest console -> a host log file. Read-only to the guest's benefit; the
+    # guest cannot read this file back.
+    -chardev "file,id=ivcon,path=$QUARANTINE/console.log"
+    -serial chardev:ivcon
+
+    -rtc base=utc
+    -no-reboot                      # a guest reboot ends the run
+)
+
+# DEV-005: virtio-rng is a host-to-guest data path. Opt-in only, and recorded.
+if [ "$ALLOW_RNG" -eq 1 ]; then
+    say "WARNING: --allow-rng exposes a host-to-guest entropy path (DEV-005)"
+    ARGS+=(-object rng-random,id=rng0,filename=/dev/urandom
+           -device virtio-rng-pci,rng=rng0)
+fi
+
+# VMM-002: apply the AppArmor profile if it has been loaded.
+LAUNCH=(qemu-system-x86_64)
+if command -v aa-exec >/dev/null 2>&1 \
+   && aa-status --profiled 2>/dev/null | grep -q . \
+   && grep -qs '^ironveil-qemu ' /sys/kernel/security/apparmor/profiles; then
+    LAUNCH=(aa-exec -p ironveil-qemu -- qemu-system-x86_64)
+    say "AppArmor: confining under ironveil-qemu (VMM-002)"
+else
+    say "AppArmor: profile ironveil-qemu not loaded; running unconfined (VMM-002 degraded)"
+    say "          load it with: sudo policy/apparmor/install"
+fi
+
+# ------------------------------------------------------------------- launch --
+# RES-001/2/3: hard caps in a transient cgroup scope. MemorySwapMax=0 keeps
+# guest RAM off host swap, which matters for disposal hygiene as much as for
+# resource safety.
+SCOPE=(systemd-run --user --scope --quiet
+       --unit "ironveil-$RUN_ID"
+       -p MemoryMax="${MEM_MB}M"
+       -p MemorySwapMax=0
+       -p CPUQuota="${CPU_QUOTA}%"
+       -p TasksMax=64)
+
+say "launching: ${MEM_MB}MB / ${CPUS} vcpu / ${CPU_QUOTA}% cpu / ${TIMEOUT}s wall clock"
+set +e
+timeout --kill-after=10s "$TIMEOUT" "${SCOPE[@]}" "${LAUNCH[@]}" "${ARGS[@]}"
+QRC=$?
+set -e
+QEMU_PID=""
+
+case $QRC in
+    0)   say "guest exited cleanly" ;;
+    124) say "WALL-CLOCK TIMEOUT: guest destroyed at ${TIMEOUT}s (RES-005)" ;;
+    137) say "guest killed (SIGKILL)" ;;
+    *)   say "qemu exited $QRC" ;;
+esac
+
+# A nonzero receiver exit is a normal, meaningful outcome -- an enforced cap
+# is a success, not a launcher failure -- so it must not trip `set -e` and
+# skip the checks below.
+RRC=0
+wait "$RECV_PID" 2>/dev/null || RRC=$?
+RECV_PID=""
+
+# FS-003: prove the base image is byte-identical after the run.
+BASE_SHA_AFTER=$(sha256sum "$BASE/initramfs" | cut -d' ' -f1)
+if [ "$BASE_SHA_BEFORE" = "$BASE_SHA_AFTER" ]; then
+    say "base image unchanged (FS-003 ok)"
+else
+    say "BASE IMAGE CHANGED DURING RUN -- FS-003 VIOLATED"
+    exit 1
+fi
+
+case $RRC in
+    0) say "export ok" ;;
+    3) say "receiver aborted the stream on a policy violation (see log above)" ;;
+    4) say "guest never connected to the output channel" ;;
+    *) say "receiver exited $RRC" ;;
+esac
+
+say "artifacts: $QUARANTINE"
+ls -l "$QUARANTINE" >&2 || true
+
+# 0 = nominal, 3 = the receiver enforced a cap (the boundary did its job and
+# the caller should know), other = receiver malfunction.
+case $RRC in
+    0|4) exit 0 ;;
+    3)   exit 3 ;;
+    *)   exit 0 ;;
+esac

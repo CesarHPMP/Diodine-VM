@@ -1,0 +1,39 @@
+#!/bin/bash
+# Load the Ironveil VMM confinement profile. Requires root.
+#
+#     sudo policy/apparmor/install            # load
+#     sudo policy/apparmor/install --remove   # unload
+#
+# The profile is named (not path-attached), so loading it does not change the
+# behaviour of any other QEMU on this machine. Only ironveil-run opts in, via
+# aa-exec.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$HERE/../.." && pwd)"
+TEMPLATE="$HERE/ironveil-qemu.in"
+TARGET=/etc/apparmor.d/ironveil-qemu
+
+[ "$(id -u)" -eq 0 ] || { echo "must be run as root" >&2; exit 1; }
+command -v apparmor_parser >/dev/null || { echo "apparmor_parser not found" >&2; exit 1; }
+
+if [ "${1:-}" = "--remove" ]; then
+    [ -f "$TARGET" ] && apparmor_parser -R "$TARGET" || true
+    rm -f "$TARGET"
+    echo "ironveil-qemu profile removed"
+    exit 0
+fi
+
+sed "s|@IRONVEIL_ROOT@|$ROOT|g" "$TEMPLATE" > "$TARGET"
+chmod 0644 "$TARGET"
+
+echo "loading profile for repository root: $ROOT"
+apparmor_parser -r -W "$TARGET"
+
+echo
+echo "loaded. verify with:"
+echo "    aa-status | grep ironveil"
+echo "then re-run ironveil-run; it should report 'confining under ironveil-qemu'."
+echo
+echo "if a run now fails, check for denials:"
+echo "    sudo dmesg | grep -i 'apparmor.*ironveil'"

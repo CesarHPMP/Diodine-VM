@@ -1,0 +1,380 @@
+#!/usr/bin/env python3
+"""Ironveil host-side output receiver.
+
+Owns the unix socket that the guest's virtio-serial port is wired to, and
+copies framed bytes from the guest into a per-run quarantine directory.
+
+Security properties this program is responsible for (see policy/policy.yaml):
+
+  OUT-001  The channel is guest -> host only, and that is enforced by which
+           file descriptors exist rather than by this program's restraint.
+           QEMU's pipe chardev uses two FIFOs: it writes guest output to
+           <path>.out and reads host input from <path>.in. This process opens
+           ONLY <path>.out, and only O_RDONLY. It never opens <path>.in at
+           all, so it holds no descriptor through which a byte could reach the
+           guest -- no writer exists, so the guest's reads see EOF forever.
+           Verify by listing /proc/<pid>/fd for every Ironveil process.
+
+           (The earlier design used a unix socket and shutdown(SHUT_WR). That
+           is incompatible with QEMU: the socket chardev reads the resulting
+           EOF as a disconnect and tears the channel down. The FIFO pair gives
+           a strictly stronger property and does not fight the VMM.)
+  OUT-003  This program never parses artifact content. It reads a fixed-size
+           header and copies N bytes. It imports no archive, image, or media
+           library, and it never executes anything it receives.
+  RES-006  Per-artifact size, total size, and artifact count are bounded, and
+           the bounds are enforced while streaming -- before the bytes reach
+           disk -- not checked afterwards.
+
+Wire format (all integers big-endian, no alignment, no nesting):
+
+    magic     4 bytes   b"IVF1"
+    name_len  2 bytes   uint16, 1..255
+    size      8 bytes   uint64
+    name      name_len bytes, ASCII, [A-Za-z0-9._-] only
+    payload   size bytes, opaque
+
+A stream ends at EOF. Any deviation from the format aborts the whole run:
+a guest that cannot follow a four-field header is not one whose framing we
+want to start guessing at.
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import select
+import socket
+import stat
+import struct
+import sys
+import time
+
+MAGIC = b"IVF1"
+HEADER = struct.Struct(">4sHQ")
+NAME_RE = re.compile(rb"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$")
+CHUNK = 65536
+
+# Conservative defaults. The launcher passes explicit values; these matter
+# only if someone runs the receiver by hand.
+DEF_MAX_TOTAL = 256 * 1024 * 1024
+DEF_MAX_ARTIFACT = 64 * 1024 * 1024
+DEF_MAX_FILES = 64
+DEF_TIMEOUT = 900
+
+
+class PolicyViolation(Exception):
+    """Raised when the guest breaks the output contract. Always fatal."""
+
+
+def log(msg):
+    print(f"[receiver] {msg}", file=sys.stderr, flush=True)
+
+
+def validate_name(raw):
+    """Artifact names are host filenames. Treat them as hostile input."""
+    if not NAME_RE.match(raw):
+        raise PolicyViolation(f"illegal artifact name: {raw!r}")
+    name = raw.decode("ascii")
+    # NAME_RE already forbids "/" and a leading dot, which rules out traversal
+    # and dotfiles, but assert the invariant rather than trusting the regex.
+    if name in (".", "..") or "/" in name or name.startswith("."):
+        raise PolicyViolation(f"illegal artifact name: {name!r}")
+    return name
+
+
+class Deadline:
+    def __init__(self, seconds):
+        self.end = time.monotonic() + seconds
+
+    def remaining(self):
+        left = self.end - time.monotonic()
+        if left <= 0:
+            raise PolicyViolation("wall-clock deadline exceeded")
+        return left
+
+
+class FifoChannel:
+    """Read side of QEMU's outbound FIFO.
+
+    Only <path>.out is opened, O_RDONLY. Nothing here can write to the guest.
+
+    A FIFO read end with no writer attached reports EOF, which is
+    indistinguishable from a finished stream if you only look at read(). So
+    "no writer yet" is tracked explicitly: EOF before the first byte means
+    QEMU has not attached, and we keep waiting until the deadline; EOF after
+    the first byte is a genuine end of stream.
+    """
+
+    def __init__(self, path):
+        self.path = path
+        # O_NONBLOCK so that opening does not block on a writer appearing.
+        # Deliberately NOT O_RDWR -- that would keep a write end alive in this
+        # process and destroy the property described in the module docstring.
+        self.fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        self.poller = select.poll()
+        self.poller.register(self.fd, select.POLLIN)
+        self.connected = False
+
+    def read(self, maxlen, deadline):
+        while True:
+            timeout_ms = min(deadline.remaining(), 1.0) * 1000
+            events = self.poller.poll(timeout_ms)
+            if not events:
+                continue  # tick; deadline.remaining() raises once expired
+
+            for _, ev in events:
+                if ev & select.POLLIN:
+                    data = os.read(self.fd, maxlen)
+                    if data:
+                        self.connected = True
+                        return data
+                    if self.connected:
+                        return b""  # writer closed: real end of stream
+                elif ev & (select.POLLHUP | select.POLLERR):
+                    if self.connected:
+                        return b""
+                    # No writer has attached yet. POLLHUP fires continuously in
+                    # that state, so back off rather than spinning a core.
+                    time.sleep(0.05)
+
+    def close(self):
+        try:
+            os.close(self.fd)
+        except OSError:
+            pass
+
+
+class SocketChannel:
+    """Unix-socket variant, kept for standalone testing of the wire format.
+
+    Not used by ironveil-run: see the docstring for why a socket cannot carry
+    the OUT-001 guarantee against QEMU's chardev.
+    """
+
+    def __init__(self, conn):
+        self.conn = conn
+
+    def read(self, maxlen, deadline):
+        self.conn.settimeout(min(deadline.remaining(), 30.0))
+        try:
+            return self.conn.recv(maxlen)
+        except socket.timeout:
+            return None  # caller retries; the deadline is the real bound
+
+    def close(self):
+        try:
+            self.conn.close()
+        except OSError:
+            pass
+
+
+def read_exact(chan, n, deadline):
+    """Read exactly n bytes, or raise. Returns b'' only for a clean EOF at n>0."""
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = chan.read(min(CHUNK, n - len(buf)), deadline)
+        if chunk is None:
+            continue
+        if not chunk:
+            if not buf:
+                return b""  # clean end of stream on a frame boundary
+            raise PolicyViolation(
+                f"truncated stream: wanted {n} bytes, got {len(buf)} before EOF"
+            )
+        buf += chunk
+    return bytes(buf)
+
+
+def receive(chan, outdir, limits, deadline):
+    total = 0
+    manifest = []
+
+    while True:
+        head = read_exact(chan, HEADER.size, deadline)
+        if head == b"":
+            break  # guest closed cleanly between artifacts
+
+        magic, name_len, size = HEADER.unpack(head)
+        if magic != MAGIC:
+            raise PolicyViolation(f"bad frame magic: {magic!r}")
+        if not 1 <= name_len <= 255:
+            raise PolicyViolation(f"bad name length: {name_len}")
+        if size > limits["max_artifact"]:
+            raise PolicyViolation(
+                f"artifact exceeds per-file cap: {size} > {limits['max_artifact']}"
+            )
+        if total + size > limits["max_total"]:
+            raise PolicyViolation(
+                f"artifact would exceed total cap: "
+                f"{total} + {size} > {limits['max_total']}"
+            )
+        if len(manifest) >= limits["max_files"]:
+            raise PolicyViolation(
+                f"artifact count cap reached: {limits['max_files']}"
+            )
+
+        name = validate_name(read_exact(chan, name_len, deadline))
+        path = os.path.join(outdir, name)
+
+        # O_EXCL: a repeated name is a policy violation, never an overwrite.
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400)
+        except FileExistsError:
+            raise PolicyViolation(f"duplicate artifact name: {name}")
+
+        digest = hashlib.sha256()
+        written = 0
+        try:
+            with os.fdopen(fd, "wb") as out:
+                while written < size:
+                    want = min(CHUNK, size - written)
+                    chunk = read_exact(chan, want, deadline)
+                    if chunk == b"":
+                        raise PolicyViolation(
+                            f"artifact {name} truncated at {written}/{size}"
+                        )
+                    out.write(chunk)
+                    digest.update(chunk)
+                    written += len(chunk)
+        except BaseException:
+            # A partial artifact is not an artifact. Do not leave it behind for
+            # the ingest stage to find and treat as complete.
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            raise
+
+        total += written
+        manifest.append(
+            {"name": name, "bytes": written, "sha256": digest.hexdigest()}
+        )
+        log(f"received {name} ({written} bytes, sha256={digest.hexdigest()[:16]}...)")
+
+    return total, manifest
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Ironveil output receiver")
+    src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument("--fifo", help="path to QEMU's outbound FIFO (<path>.out). "
+                                    "This is what ironveil-run uses.")
+    src.add_argument("--socket", help="unix socket to own (testing only; a "
+                                      "socket cannot carry OUT-001 -- see the "
+                                      "module docstring)")
+    ap.add_argument("--outdir", required=True, help="per-run quarantine directory")
+    ap.add_argument("--max-total", type=int, default=DEF_MAX_TOTAL)
+    ap.add_argument("--max-artifact", type=int, default=DEF_MAX_ARTIFACT)
+    ap.add_argument("--max-files", type=int, default=DEF_MAX_FILES)
+    ap.add_argument("--timeout", type=int, default=DEF_TIMEOUT)
+    ap.add_argument("--ready-fd", type=int, default=None,
+                    help="write a byte here once listening, so the launcher "
+                         "can start QEMU without racing the socket")
+    args = ap.parse_args()
+
+    if os.geteuid() == 0:
+        log("refusing to run as root: this process handles hostile input")
+        return 2
+
+    limits = {
+        "max_total": args.max_total,
+        "max_artifact": args.max_artifact,
+        "max_files": args.max_files,
+    }
+
+    os.makedirs(args.outdir, mode=0o700, exist_ok=True)
+
+    deadline = Deadline(args.timeout)
+    rc = 0
+    total, manifest = 0, []
+    chan = None
+    srv = None
+
+    try:
+        if args.fifo:
+            if not stat.S_ISFIFO(os.stat(args.fifo).st_mode):
+                log(f"not a FIFO: {args.fifo}")
+                return 2
+            chan = FifoChannel(args.fifo)
+            log(f"reading {args.fifo} (O_RDONLY only; no write path to the "
+                f"guest exists in this process -- OUT-001)")
+            if args.ready_fd is not None:
+                os.write(args.ready_fd, b"1")
+                os.close(args.ready_fd)
+        else:
+            # AF_UNIX paths are capped at 108 bytes including the NUL. Catch it
+            # here rather than as a bind() traceback mid-run.
+            if len(os.fsencode(args.socket)) > 107:
+                log(f"socket path too long for AF_UNIX "
+                    f"({len(os.fsencode(args.socket))} bytes, max 107)")
+                return 2
+            try:
+                os.unlink(args.socket)
+            except FileNotFoundError:
+                pass
+            srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            old_umask = os.umask(0o177)
+            try:
+                srv.bind(args.socket)
+            finally:
+                os.umask(old_umask)
+            os.chmod(args.socket, stat.S_IRUSR | stat.S_IWUSR)
+            srv.listen(1)
+            log(f"listening on {args.socket}")
+            if args.ready_fd is not None:
+                os.write(args.ready_fd, b"1")
+                os.close(args.ready_fd)
+            srv.settimeout(deadline.remaining())
+            conn, _ = srv.accept()
+            chan = SocketChannel(conn)
+            log("connection accepted")
+
+        total, manifest = receive(chan, args.outdir, limits, deadline)
+        log(f"stream complete: {len(manifest)} artifact(s), {total} bytes")
+    except PolicyViolation as e:
+        if "deadline" in str(e) and not manifest:
+            log("no guest output before the deadline")
+            rc = 4
+        else:
+            log(f"POLICY VIOLATION: {e}")
+            rc = 3
+    except socket.timeout:
+        log("no guest connected before the deadline")
+        rc = 4
+    except KeyboardInterrupt:
+        log("interrupted")
+        rc = 130
+    except OSError as e:
+        log(f"channel error: {e}")
+        rc = 5
+    finally:
+        if chan is not None:
+            chan.close()
+        if srv is not None:
+            srv.close()
+            try:
+                os.unlink(args.socket)
+            except OSError:
+                pass
+
+        report = {
+            "artifacts": manifest,
+            "total_bytes": total,
+            "limits": limits,
+            "result": "ok" if rc == 0 else "aborted",
+            "exit_code": rc,
+        }
+        mpath = os.path.join(args.outdir, "MANIFEST.json")
+        with open(mpath, "w") as fh:
+            json.dump(report, fh, indent=2)
+            fh.write("\n")
+        os.chmod(mpath, 0o400)
+        log(f"manifest written to {mpath}")
+
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

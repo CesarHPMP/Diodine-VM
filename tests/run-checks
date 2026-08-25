@@ -1,0 +1,175 @@
+#!/bin/bash
+# Ironveil Phase 1 verification.
+#
+# Every check names the policy statement it verifies. This is deliberately NOT
+# the Phase 2 adversarial suite -- these payloads are cooperative probes that
+# confirm the boundary is configured as claimed. Phase 2 is where hostile
+# workloads try to break it.
+set -uo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
+cd "$ROOT"
+
+PASS=0; FAIL=0
+ok()   { printf '  \033[32mPASS\033[0m  %-10s %s\n' "$1" "$2"; PASS=$((PASS+1)); }
+bad()  { printf '  \033[31mFAIL\033[0m  %-10s %s\n' "$1" "$2"; FAIL=$((FAIL+1)); }
+head_() { printf '\n\033[1m%s\033[0m\n' "$1"; }
+
+check() {  # check ID DESCRIPTION ACTUAL EXPECTED
+    if [ "$3" = "$4" ]; then ok "$1" "$2"
+    else bad "$1" "$2 (got '$3', want '$4')"; fi
+}
+
+TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+
+# =============================================================== guest surface
+head_ "A. Guest-visible attack surface"
+rm -rf "$TMP/q"; mkdir -p "$TMP/q"
+./bin/ironveil-run --payload tests/payloads/probe.sh --timeout 90 \
+    > "$TMP/probe.log" 2>&1
+PROBE=$(ls -td quarantine/*/ | head -1)
+P="$PROBE/probe.txt"
+
+if [ ! -r "$P" ]; then
+    bad "PROBE" "probe artifact never arrived; see $TMP/probe.log"
+else
+    v() { sed -n "s/^$1=//p" "$P"; }
+    check NET-001  "no network interface but loopback"  "$(v netifs)"        "lo,"
+    check DEV-001  "no USB devices"                     "$(v usb)"           ""
+    check DEV-002  "no DRM/graphics device"             "$(v drm)"           ""
+    check DEV-005  "no host entropy source"             "$(v hwrng)"         "none"
+    check FS-001   "9p filesystem unavailable"          "$(v has_9p)"        "no"
+    check FS-001   "virtiofs unavailable"               "$(v has_virtiofs)"  "no"
+    check FS-001   "no shared folder mounted"           "$(v mounted_9p)"    ""
+    check FS-002   "no block device mounted"            "$(v block_mounts)"  ""
+    check DEV-004  "only the one sanctioned virtio port" \
+                   "$(v virtio_ports)" "org.ironveil.out,"
+    check OUT-001  "guest read from the port yields nothing" \
+                   "$(v readback_bytes)" "0"
+fi
+
+# ================================================================ export caps
+head_ "B. Export bounds (host-side enforcement)"
+./bin/ironveil-run --payload tests/payloads/oversize.sh \
+    --max-artifact 4096 --timeout 90 > "$TMP/over.log" 2>&1
+OVER=$(ls -td quarantine/*/ | head -1)
+if grep -q "exceeds per-file cap" "$TMP/over.log"; then
+    ok "RES-006" "oversized artifact refused by the receiver"
+else
+    bad "RES-006" "receiver did not refuse an oversized artifact"
+fi
+if [ -e "$OVER/huge.bin" ]; then
+    bad "RES-006" "partial artifact was left on disk"
+else
+    ok "RES-006" "no partial artifact left behind"
+fi
+
+# ================================================================= wall clock
+head_ "C. Wall-clock containment"
+START=$(date +%s)
+./bin/ironveil-run --payload tests/payloads/spin.sh --timeout 20 \
+    > "$TMP/spin.log" 2>&1
+ELAPSED=$(( $(date +%s) - START ))
+if grep -q "WALL-CLOCK TIMEOUT" "$TMP/spin.log"; then
+    ok "RES-005" "non-cooperative guest destroyed at the deadline (${ELAPSED}s)"
+else
+    bad "RES-005" "guest was not killed by the deadline (${ELAPSED}s)"
+fi
+if [ "$ELAPSED" -lt 45 ]; then
+    ok "RES-005" "deadline enforced promptly (${ELAPSED}s for a 20s budget)"
+else
+    bad "RES-005" "deadline overran badly (${ELAPSED}s for a 20s budget)"
+fi
+
+# ================================================================ base image
+head_ "D. Base image immutability"
+if grep -q "base image unchanged" "$TMP/spin.log"; then
+    ok "FS-003" "base image byte-identical after a hostile run"
+else
+    bad "FS-003" "base image integrity was not confirmed"
+fi
+
+# =============================================================== ingest bounds
+head_ "E. Ingest bounds"
+python3 - "$TMP" <<'PY'
+import io, sys, tarfile, zipfile
+T = sys.argv[1]
+with zipfile.ZipFile(f"{T}/bomb.zip", "w", zipfile.ZIP_DEFLATED) as z:
+    z.writestr("b.dat", b"\0" * (256 * 1024 * 1024))
+with zipfile.ZipFile(f"{T}/trav.zip", "w") as z:
+    z.writestr("../../../../etc/ironveil-pwned", b"escaped\n")
+buf = io.BytesIO()
+with tarfile.open(fileobj=buf, mode="w") as t:
+    l = tarfile.TarInfo("shadow"); l.type = tarfile.SYMTYPE; l.linkname = "/etc/shadow"
+    t.addfile(l)
+open(f"{T}/sym.tar", "wb").write(buf.getvalue())
+with zipfile.ZipFile(f"{T}/ok.zip", "w", zipfile.ZIP_DEFLATED) as z:
+    z.writestr("report.txt", b"clean\n" * 100)
+PY
+
+./bin/ironveil-ingest "$TMP/bomb.zip" "$TMP/o1" --max-output-bytes 20000000 >"$TMP/i1" 2>&1
+[ $? -eq 3 ] && ok "ING-001" "zip bomb refused" || bad "ING-001" "zip bomb not refused"
+[ -e "$TMP/o1" ] && bad "ING-001" "partial output left behind" \
+                 || ok "ING-001" "partial output removed"
+
+./bin/ironveil-ingest "$TMP/trav.zip" "$TMP/o2" >"$TMP/i2" 2>&1
+[ $? -eq 3 ] && ok "ING-002" "path traversal refused" || bad "ING-002" "traversal not refused"
+[ -e /etc/ironveil-pwned ] && bad "ING-002" "TRAVERSAL SUCCEEDED" \
+                           || ok "ING-002" "nothing written outside destination"
+
+./bin/ironveil-ingest "$TMP/sym.tar" "$TMP/o3" >"$TMP/i3" 2>&1
+[ $? -eq 3 ] && ok "ING-002" "symlink member refused" || bad "ING-002" "symlink not refused"
+
+./bin/ironveil-ingest "$TMP/ok.zip" "$TMP/o4" >"$TMP/i4" 2>&1
+[ $? -eq 0 ] && ok "ING-001" "benign archive still expands" \
+             || bad "ING-001" "benign archive was wrongly refused"
+
+# ============================================================== code invariants
+head_ "F. Code invariants"
+# The inbound FIFO must be referenced exactly once -- by mkfifo, which has to
+# create it for QEMU to start -- and never opened by anything. Comments are
+# excluded so that documenting the invariant does not violate it.
+INBOUND=$(grep -rn '\$PIPE\.in' bin/ guest/ 2>/dev/null \
+          | grep -vE ':[0-9]+:[[:space:]]*#' \
+          | grep -v 'mkfifo' || true)
+if [ -n "$INBOUND" ]; then
+    bad "OUT-001" "inbound FIFO referenced outside mkfifo: $INBOUND"
+else
+    ok "OUT-001" "inbound FIFO is created and never opened"
+fi
+
+# The channel itself must be opened read-only. Inspect the actual os.open()
+# call rather than the class text -- the docstring names O_RDWR precisely to
+# explain why it is not used, and matching prose is not evidence.
+# (O_WRONLY elsewhere in the receiver writes artifacts to disk; unrelated.)
+OPENCALL=$(sed -n '/class FifoChannel/,/^class SocketChannel/p' bin/ironveil-receiver \
+           | grep -F 'os.open(' || true)
+if [ -z "$OPENCALL" ]; then
+    bad "OUT-001" "could not find FifoChannel's open call"
+elif printf '%s' "$OPENCALL" | grep -qE 'O_RDWR|O_WRONLY'; then
+    bad "OUT-001" "FifoChannel opens the channel writable: $OPENCALL"
+elif printf '%s' "$OPENCALL" | grep -q 'os.O_RDONLY'; then
+    ok "OUT-001" "channel opened O_RDONLY only"
+else
+    bad "OUT-001" "unrecognised open mode: $OPENCALL"
+fi
+
+if grep -rnE '\b(mount|losetup)\b' bin/ 2>/dev/null | grep -v '^\s*#' | grep -q . ; then
+    bad "FS-002" "a host component calls mount/losetup"
+else
+    ok "FS-002" "no host component mounts guest-authored data"
+fi
+if grep -rnE '\bsudo\b' bin/ image/build-base-image 2>/dev/null | grep -qv 'policy/apparmor/install'; then
+    bad "TCB-001" "a component invokes sudo"
+else
+    ok "TCB-001" "no component escalates privilege"
+fi
+if grep -qE 'import (zipfile|tarfile|gzip)' bin/ironveil-receiver; then
+    bad "OUT-003" "receiver imports an archive library"
+else
+    ok "OUT-003" "receiver parses no artifact content"
+fi
+
+printf '\n\033[1m%d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ]

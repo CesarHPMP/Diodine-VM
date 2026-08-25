@@ -1,0 +1,10 @@
+# Runtime state and artifacts — never committed.
+var/
+quarantine/
+image/build/
+image/base/
+*.qcow2
+*.img
+*.sock
+*.pid
+*.log
