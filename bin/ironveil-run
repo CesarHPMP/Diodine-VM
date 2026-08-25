@@ -217,10 +217,17 @@ if [ "$ALLOW_RNG" -eq 1 ]; then
 fi
 
 # VMM-002: apply the AppArmor profile if it has been loaded.
+#
+# Detection is by attempting the transition, not by reading the profile set.
+# Both `aa-status --profiled` and /sys/kernel/security/apparmor/profiles are
+# root-only, and TCB-001 forbids this launcher from having root -- so any
+# readability test reports "not loaded" no matter how the profile is installed,
+# which made VMM-002 unsatisfiable rather than merely unmet. aa-exec answers the
+# real question unprivileged: exit 0 on a loaded profile, and a "profile does
+# not exist" error otherwise.
 LAUNCH=(qemu-system-x86_64)
 if command -v aa-exec >/dev/null 2>&1 \
-   && aa-status --profiled 2>/dev/null | grep -q . \
-   && grep -qs '^ironveil-qemu ' /sys/kernel/security/apparmor/profiles; then
+   && aa-exec -p ironveil-qemu -- /bin/true 2>/dev/null; then
     LAUNCH=(aa-exec -p ironveil-qemu -- qemu-system-x86_64)
     say "AppArmor: confining under ironveil-qemu (VMM-002)"
 else

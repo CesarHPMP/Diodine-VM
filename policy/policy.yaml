@@ -192,10 +192,21 @@ policy:
   - id: VMM-002
     claim: The VMM process is confined by mandatory access control.
     enforced_by: AppArmor profile ironveil-qemu, applied via aa-exec
-    verify: /proc/<pid>/attr/current names the ironveil-qemu profile
+    verify: read attr/current for the qemu process, located via the run's cgroup
+            scope rather than by process name -- comm truncates at 15 characters,
+            so qemu-system-x86_64 cannot be matched by name, and a command-line
+            match will match the searching process itself. Confined runs read
+            "ironveil-qemu (enforce)".
     status: partial
     note: Requires the profile to be loaded once with root. The launcher warns
           and continues if it is absent, so this degrades rather than blocks.
+          Detection must NOT read the profile set -- aa-status --profiled and
+          /sys/kernel/security/apparmor/profiles are both root-only, and TCB-001
+          forbids this launcher root, so a readability check reports "not loaded"
+          however the profile is installed. That made this claim unsatisfiable
+          rather than merely unmet until the launcher switched to detecting by
+          attempted transition. Verified in enforce mode on the development host;
+          the profile itself has been exercised on no other.
 
   - id: TCB-001
     claim: No root-privileged daemon is introduced into the trusted computing

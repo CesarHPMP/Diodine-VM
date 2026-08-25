@@ -63,9 +63,14 @@ profile ironveil-qemu flags=(attach_disconnected) {
   @{PROC}/@{pid}/cmdline                r,
   @{PROC}/sys/vm/overcommit_memory      r,
   @{PROC}/sys/vm/max_map_count          r,
-  /sys/devices/system/cpu/**            r,
-  /sys/devices/system/node/**           r,
-  /sys/kernel/mm/transparent_hugepage/** r,
+  # The trailing-slash forms matter. A '**' glob matches paths BELOW a
+  # directory but never the directory inode itself, so qemu's readdir of
+  # /sys/devices/system/node/ (NUMA topology probe at startup) was denied while
+  # every file inside it was readable. Non-fatal -- qemu falls back and the VM
+  # boots -- but it logged a denial on every run. {,**} covers both.
+  /sys/devices/system/cpu/{,**}            r,
+  /sys/devices/system/node/{,**}           r,
+  /sys/kernel/mm/transparent_hugepage/{,**} r,
   /dev/urandom                          r,
   /dev/null                             rw,
   /dev/ptmx                             rw,
