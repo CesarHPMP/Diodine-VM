@@ -187,9 +187,20 @@ def read_exact(chan, n, deadline):
     return bytes(buf)
 
 
+# Guest-chosen names and host-authored records must not share a namespace.
+# validate_name forbids "/", so a name can never escape this subdirectory --
+# which means the guest cannot produce a path that collides with MANIFEST.json,
+# RUN.json or console.log. The alternative, a list of reserved names, is the
+# fragile option: it has to enumerate every record the host might ever write,
+# and it silently fails the day one is added.
+ARTIFACT_DIR = "artifacts"
+
+
 def receive(chan, outdir, limits, deadline):
     total = 0
     manifest = []
+    artdir = os.path.join(outdir, ARTIFACT_DIR)
+    os.makedirs(artdir, mode=0o700, exist_ok=True)
 
     while True:
         head = read_exact(chan, HEADER.size, deadline)
@@ -216,7 +227,7 @@ def receive(chan, outdir, limits, deadline):
             )
 
         name = validate_name(read_exact(chan, name_len, deadline))
-        path = os.path.join(outdir, name)
+        path = os.path.join(artdir, name)
 
         # O_EXCL: a repeated name is a policy violation, never an overwrite.
         try:
@@ -366,12 +377,28 @@ def main():
             "result": "ok" if rc == 0 else "aborted",
             "exit_code": rc,
         }
+        # Written via a temp file and rename so it lands atomically and cannot
+        # be blocked by whatever happens to sit at the destination. The earlier
+        # open(mpath, "w") raised PermissionError against a 0400 file and did it
+        # inside this finally block, which replaced the run's audit record with
+        # the exception -- the one failure mode an audit record must not have.
         mpath = os.path.join(args.outdir, "MANIFEST.json")
-        with open(mpath, "w") as fh:
-            json.dump(report, fh, indent=2)
-            fh.write("\n")
-        os.chmod(mpath, 0o400)
-        log(f"manifest written to {mpath}")
+        tmp = mpath + ".writing"
+        try:
+            with open(tmp, "w") as fh:
+                json.dump(report, fh, indent=2)
+                fh.write("\n")
+            os.chmod(tmp, 0o400)
+            os.replace(tmp, mpath)
+            log(f"manifest written to {mpath}")
+        except OSError as e:
+            log(f"FAILED to write manifest: {e}")
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            if rc == 0:
+                rc = 6
 
     return rc
 

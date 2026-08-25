@@ -264,10 +264,19 @@ def main():
 
     sources = []
     if os.path.isdir(args.source):
-        for entry in sorted(os.listdir(args.source)):
-            if entry == "MANIFEST.json":
-                continue
-            full = os.path.join(args.source, entry)
+        # A run directory keeps guest-authored artifacts in artifacts/ and
+        # host-authored records (MANIFEST.json, RUN.json, console.log) beside
+        # it. Preferring the subdirectory means the host's own records are
+        # excluded structurally rather than by name.
+        root = os.path.join(args.source, "artifacts")
+        if not os.path.isdir(root):
+            root = args.source
+        for entry in sorted(os.listdir(root)):
+            if root == args.source and entry in (
+                "MANIFEST.json", "RUN.json", "console.log"
+            ):
+                continue  # pre-subdirectory run layout
+            full = os.path.join(root, entry)
             if os.path.isfile(full) and not os.path.islink(full):
                 sources.append(full)
     elif os.path.isfile(args.source) and not os.path.islink(args.source):

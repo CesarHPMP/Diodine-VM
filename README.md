@@ -27,6 +27,19 @@ Analysing something:
 The payload runs as root inside the guest. Anything it writes to
 `/ironveil/out/` is exported; the sample appears at `/ironveil/sample/`.
 
+Each run directory separates the two trust domains by layout:
+
+```
+quarantine/<run-id>/
+    artifacts/       guest-authored. names chosen by the guest, trust nothing
+    MANIFEST.json    host-authored. what crossed, with sizes and hashes
+    RUN.json         host-authored. the boundary's measured state during the run
+    console.log      host-authored. guest kernel and init output
+```
+
+Guest names cannot contain a slash, so nothing the guest emits can collide with
+a host record no matter what it calls itself (AUD-002).
+
 ## How it works
 
 ```
@@ -45,7 +58,7 @@ The payload runs as root inside the guest. Anything it writes to
                                      iv.in  (FIFO, no writer ever)
                                             │
                                             ▼
-                                   quarantine/<run-id>/
+                                   quarantine/<run-id>/artifacts/
                                             │
                                    ironveil-ingest (bounded)
 ```
@@ -74,12 +87,13 @@ charged against a single global budget so a bomb cannot buy room by nesting.
 
 ## What is and is not enforced
 
-Verified by `tests/run-checks` (26 checks): no network interface, no USB, no
+Verified by `tests/run-checks` (36 checks): no network interface, no USB, no
 graphics, no shared folders, no block device, one sanctioned virtio port, no
 host entropy source, guest-side readback yields nothing, export caps enforced
 mid-stream, wall-clock destruction of a non-cooperative guest, base image
-byte-identical after a run, and ingest refusal of zip bombs, path traversal,
-and symlink members.
+byte-identical after a run, ingest refusal of zip bombs, path traversal and
+symlink members, every run recording its own measured confinement state, and
+host records surviving a guest that emits artifacts named after them.
 
 Known gaps, all recorded in `policy/policy.yaml`:
 

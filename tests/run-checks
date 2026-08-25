@@ -29,7 +29,7 @@ rm -rf "$TMP/q"; mkdir -p "$TMP/q"
 ./bin/ironveil-run --payload tests/payloads/probe.sh --timeout 90 \
     > "$TMP/probe.log" 2>&1
 PROBE=$(ls -td quarantine/*/ | head -1)
-P="$PROBE/probe.txt"
+P="$PROBE/artifacts/probe.txt"
 
 if [ ! -r "$P" ]; then
     bad "PROBE" "probe artifact never arrived; see $TMP/probe.log"
@@ -59,7 +59,7 @@ if grep -q "exceeds per-file cap" "$TMP/over.log"; then
 else
     bad "RES-006" "receiver did not refuse an oversized artifact"
 fi
-if [ -e "$OVER/huge.bin" ]; then
+if [ -e "$OVER/artifacts/huge.bin" ]; then
     bad "RES-006" "partial artifact was left on disk"
 else
     ok "RES-006" "no partial artifact left behind"
@@ -214,6 +214,43 @@ else
     else
         ok "TCB-001" "VMM ran unprivileged (uid $(j uid))"
     fi
+fi
+
+# ==================================================== host-record integrity
+head_ "H. Host-record integrity (AUD-002)"
+./bin/ironveil-run --payload tests/payloads/reserved-names.sh --timeout 90 \
+    > "$TMP/reserved.log" 2>&1
+RES=$(ls -td quarantine/*/ | head -1)
+
+if grep -q "FORGED BY THE GUEST" "$RES/MANIFEST.json" 2>/dev/null; then
+    bad "AUD-002" "guest content replaced the run manifest"
+elif ! grep -q '"name": "genuine.txt"' "$RES/MANIFEST.json" 2>/dev/null; then
+    bad "AUD-002" "manifest is intact but does not list the real artifact"
+else
+    ok "AUD-002" "manifest survives a guest claiming its name"
+fi
+
+if grep -q "FORGED BY THE GUEST" "$RES/RUN.json" 2>/dev/null; then
+    bad "AUD-002" "guest content replaced the launch-state record"
+elif grep -q 'apparmor_profile' "$RES/RUN.json" 2>/dev/null; then
+    ok "AUD-002" "launch-state record survives, including the .writing name"
+else
+    bad "AUD-002" "launch-state record missing after the collision attempt"
+fi
+
+if grep -q "FORGED BY THE GUEST" "$RES/console.log" 2>/dev/null; then
+    bad "AUD-002" "guest content replaced the console log"
+else
+    ok "AUD-002" "console log survives a guest claiming its name"
+fi
+
+# The forged files must still have been DELIVERED -- they are legitimate
+# artifacts with awkward names, not something to silently drop. Refusing them
+# would let a guest suppress its own export by choosing a name.
+if [ -s "$RES/artifacts/MANIFEST.json" ] && [ -s "$RES/artifacts/genuine.txt" ]; then
+    ok "AUD-002" "awkwardly-named artifacts still delivered, in artifacts/"
+else
+    bad "AUD-002" "artifacts were dropped rather than namespaced"
 fi
 
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$PASS" "$FAIL"

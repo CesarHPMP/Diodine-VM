@@ -201,6 +201,28 @@ policy:
           correctly while the profile denied qemu's NUMA probe on every one of
           them -- nothing on disk recorded either fact.
 
+  - id: AUD-002
+    claim: A guest cannot forge, replace, or suppress any host-authored record of
+           its own run.
+    enforced_by: guest-chosen artifact names are written into the artifacts/
+                 subdirectory of the run and cannot contain a slash, so they
+                 share no namespace with MANIFEST.json, RUN.json or console.log;
+                 the manifest is written to a temporary name and renamed into
+                 place, so nothing sitting at its destination can block it
+    verify: a payload emitting artifacts named MANIFEST.json, RUN.json,
+            console.log and RUN.json.writing leaves all three host records
+            intact and correct, and is still itself delivered
+    status: enforced
+    note: Found by emitting an artifact called MANIFEST.json. The name passed
+          validation, O_EXCL created it mode 0400 before the receiver wrote its
+          own manifest, and the receiver then died on PermissionError inside a
+          finally block -- leaving the run's audit record claiming it had
+          exported nothing, beside an artifact it never listed, while the
+          launcher still exited 0. Reserving names by enumeration was rejected
+          as the fix, because it must list every record the host may ever write
+          and fails silently the day one is added. RUN.json.writing is in the
+          test for exactly that reason.
+
   - id: VMM-001
     claim: The VMM process runs unprivileged and under a seccomp sandbox.
     enforced_by: no sudo anywhere in the launcher; qemu -sandbox on with
