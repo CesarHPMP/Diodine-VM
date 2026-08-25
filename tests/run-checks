@@ -171,5 +171,50 @@ else
     ok "OUT-003" "receiver parses no artifact content"
 fi
 
+# ========================================================= launch-state record
+head_ "G. Launch-state record (AUD-001)"
+R="$PROBE/RUN.json"
+j() { sed -n "s/.*\"$1\": \"\{0,1\}\([^\",]*\)\"\{0,1\},\{0,1\}.*/\1/p" "$R" | head -1; }
+if [ ! -r "$R" ]; then
+    bad "AUD-001" "the probe run recorded no launch state"
+else
+    ok    "AUD-001" "run records the state of its own boundary"
+    check AUD-001 "state was measured, not assumed" "$(j observed)" "true"
+    check VMM-001 "record corroborates seccomp filter" "$(j seccomp)" "filter"
+    check AUD-001 "record corroborates confinement" "$(j confined)" "true"
+
+    # The record must not claim more than it saw. An unsampled VMM has to read
+    # "unknown", never "unconfined" -- the two are different findings, and a
+    # record that conflates them is worse than no record.
+    #
+    # This branch has to be DRIVEN, not waited for. A check that only ever sees
+    # a healthy run cannot tell you the unhealthy case is handled, and would
+    # pass vacuously forever. So run the recorder against a cgroup root that
+    # cannot exist and require it to say "unknown".
+    FB="$TMP/fallback"
+    sed -n '/^record_launch_state() {/,/^}$/p' bin/ironveil-run \
+      | sed -e 's|/sys/fs/cgroup/user.slice/user-$(id -u).slice|/nonexistent/cgroup|' \
+            -e 's|seq 400|seq 2|' > "$FB.fn"
+    ( RUN_ID=AUD-001-fallback MEM_MB=1 CPUS=1 CPU_QUOTA=1 TIMEOUT=1 ALLOW_RNG=0
+      . "$FB.fn"
+      record_launch_state "$FB.json" ) 2>/dev/null
+    if [ ! -r "$FB.json" ]; then
+        bad "AUD-001" "recorder wrote nothing when the VMM was unobservable"
+    elif grep -q 'DEGRADED (unconfined)' "$FB.json"; then
+        bad "AUD-001" "unsampled run asserted 'unconfined' without measuring it"
+    elif grep -q 'unknown (vmm not observed)' "$FB.json"; then
+        ok "AUD-001" "unsampled run reports unknown, not unconfined"
+    else
+        bad "AUD-001" "unsampled run reported neither unknown nor degraded"
+    fi
+
+    # TCB-001 from the run's own evidence rather than from a code audit.
+    if [ "$(j uid)" = "0" ]; then
+        bad "TCB-001" "the VMM ran as uid 0"
+    else
+        ok "TCB-001" "VMM ran unprivileged (uid $(j uid))"
+    fi
+fi
+
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

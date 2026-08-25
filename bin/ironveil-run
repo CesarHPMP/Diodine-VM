@@ -104,11 +104,12 @@ mkfifo -m 0600 "$PIPE.out" "$PIPE.in"
 QUARANTINE="$ROOT/quarantine/$RUN_ID"
 mkdir -p "$QUARANTINE"; chmod 0700 "$QUARANTINE"
 
-RECV_PID=""; QEMU_PID=""
+RECV_PID=""; QEMU_PID=""; PROBE_PID=""
 cleanup() {
     local rc=$?
     [ -n "$QEMU_PID" ] && kill -KILL "$QEMU_PID" 2>/dev/null || true
     [ -n "$RECV_PID" ] && kill -TERM "$RECV_PID" 2>/dev/null || true
+    [ -n "$PROBE_PID" ] && kill -TERM "$PROBE_PID" 2>/dev/null || true
     if [ "$KEEP_RUNDIR" -eq 0 ]; then
         # The per-run initramfs carries the sample. Shred it rather than
         # unlinking, so a sample does not linger in freed blocks.
@@ -235,6 +236,112 @@ else
     say "          load it with: sudo policy/apparmor/install"
 fi
 
+# ------------------------------------------------------- launch-state record --
+# A run must be able to say which claims were actually live while it happened.
+# Every value here is READ BACK from the live VMM process and its cgroup rather
+# than echoed from this script's intent: for eight runs the launcher correctly
+# reported "confining under ironveil-qemu" while the profile denied qemu's NUMA
+# probe on every one of them, and nothing on disk recorded either fact. An
+# unconfined run that believed it was confined is precisely what this record
+# exists to make visible.
+#
+# It runs as a short-lived prober so the launch line below stays one
+# unconditional statement, and it never fails the run -- a missing record means
+# the prober lost the race, which is itself written down as observed=false.
+record_launch_state() {
+    local out="$1" scope="" qpid="" comm="" i p
+
+    for i in $(seq 400); do
+        scope=$(find "/sys/fs/cgroup/user.slice/user-$(id -u).slice" \
+                     -maxdepth 4 -type d -name "ironveil-$RUN_ID.scope" \
+                     2>/dev/null | head -1)
+        if [ -n "$scope" ]; then
+            for p in $(cat "$scope/cgroup.procs" 2>/dev/null); do
+                case "$(cat "/proc/$p/comm" 2>/dev/null)" in
+                    qemu-system*) qpid=$p; comm=$(cat "/proc/$p/comm"); break ;;
+                esac
+            done
+            [ -n "$qpid" ] && break
+        fi
+        sleep 0.05
+    done
+
+    local observed=false profile="not observed" seccomp="not observed" uid=null
+    if [ -n "$qpid" ] && [ -d "/proc/$qpid" ]; then
+        observed=true
+        profile=$(tr -d '\000' < "/proc/$qpid/attr/current" 2>/dev/null | tr -d '\n')
+        [ -n "$profile" ] || profile="unreadable"
+        uid=$(awk '/^Uid:/{print $2}' "/proc/$qpid/status" 2>/dev/null)
+        [ -n "$uid" ] || uid=null
+        case "$(awk '/^Seccomp:/{print $2}' "/proc/$qpid/status" 2>/dev/null)" in
+            0) seccomp=disabled ;;
+            1) seccomp=strict ;;
+            2) seccomp=filter ;;
+            *) seccomp=unknown ;;
+        esac
+    fi
+
+    local confined=false
+    case "$profile" in ironveil-qemu*) confined=true ;; esac
+
+    local cg_mem="not observed" cg_swap="not observed" cg_cpu="not observed"
+    local cg_pids="not observed" cg_io="not observed"
+    if [ -n "$scope" ]; then
+        cg_mem=$(cat "$scope/memory.max" 2>/dev/null || echo null)
+        cg_swap=$(cat "$scope/memory.swap.max" 2>/dev/null || echo null)
+        cg_pids=$(cat "$scope/pids.max" 2>/dev/null || echo null)
+        cg_cpu=$(cat "$scope/cpu.max" 2>/dev/null || echo "")
+        [ -f "$scope/io.max" ] && cg_io=present || cg_io=absent
+    fi
+
+    # RES-004 is a known gap: without a delegated io controller there is no
+    # io.max to read, and the record says so rather than omitting it.
+    {
+        printf '{\n'
+        printf '  "run_id": "%s",\n' "$RUN_ID"
+        printf '  "observed": %s,\n' "$observed"
+        printf '  "vmm": {\n'
+        printf '    "pid": %s,\n' "${qpid:-null}"
+        printf '    "comm": "%s",\n' "$comm"
+        printf '    "uid": %s,\n' "$uid"
+        printf '    "apparmor_profile": "%s",\n' "$profile"
+        printf '    "confined": %s,\n' "$confined"
+        printf '    "seccomp": "%s"\n' "$seccomp"
+        printf '  },\n'
+        printf '  "cgroup": {\n'
+        printf '    "scope": "%s",\n' "${scope:-}"
+        printf '    "memory_max": "%s",\n' "$cg_mem"
+        printf '    "memory_swap_max": "%s",\n' "$cg_swap"
+        printf '    "cpu_max": "%s",\n' "$cg_cpu"
+        printf '    "pids_max": "%s",\n' "$cg_pids"
+        printf '    "io_max": "%s"\n' "$cg_io"
+        printf '  },\n'
+        printf '  "declared": {\n'
+        printf '    "mem_mb": %s,\n' "$MEM_MB"
+        printf '    "vcpus": %s,\n' "$CPUS"
+        printf '    "cpu_quota_pct": %s,\n' "$CPU_QUOTA"
+        printf '    "wall_clock_s": %s,\n' "$TIMEOUT"
+        printf '    "host_entropy_exposed": %s\n' "$([ "$ALLOW_RNG" -eq 1 ] && echo true || echo false)"
+        printf '  },\n'
+        printf '  "policy": {\n'
+        if [ "$observed" = true ]; then
+            printf '    "VMM-001": "%s",\n' "$([ "$seccomp" = filter ] && echo live || echo "DEGRADED ($seccomp)")"
+            printf '    "VMM-002": "%s",\n' "$([ "$confined" = true ] && echo live || echo "DEGRADED (unconfined)")"
+            printf '    "TCB-001": "%s",\n' "$([ "$uid" != 0 ] && echo live || echo "DEGRADED (uid 0)")"
+        else
+            printf '    "VMM-001": "unknown (vmm not observed)",\n'
+            printf '    "VMM-002": "unknown (vmm not observed)",\n'
+            printf '    "TCB-001": "unknown (vmm not observed)",\n'
+        fi
+        printf '    "RES-004": "%s",\n' "$([ "$cg_io" = present ] && echo live \
+            || { [ "$cg_io" = absent ] && echo "not-enforced (no io controller)" \
+                 || echo "unknown (cgroup not observed)"; })"
+        printf '    "DEV-005": "%s"\n' "$([ "$ALLOW_RNG" -eq 1 ] && echo "DEGRADED (host entropy exposed)" || echo live)"
+        printf '  }\n'
+        printf '}\n'
+    } > "$out.partial" 2>/dev/null && mv "$out.partial" "$out" && chmod 0400 "$out"
+}
+
 # ------------------------------------------------------------------- launch --
 # RES-001/2/3: hard caps in a transient cgroup scope. MemorySwapMax=0 keeps
 # guest RAM off host swap, which matters for disposal hygiene as much as for
@@ -247,6 +354,10 @@ SCOPE=(systemd-run --user --scope --quiet
        -p TasksMax=64)
 
 say "launching: ${MEM_MB}MB / ${CPUS} vcpu / ${CPU_QUOTA}% cpu / ${TIMEOUT}s wall clock"
+
+record_launch_state "$QUARANTINE/RUN.json" &
+PROBE_PID=$!
+
 set +e
 timeout --kill-after=10s "$TIMEOUT" "${SCOPE[@]}" "${LAUNCH[@]}" "${ARGS[@]}"
 QRC=$?
@@ -263,6 +374,17 @@ esac
 # A nonzero receiver exit is a normal, meaningful outcome -- an enforced cap
 # is a success, not a launcher failure -- so it must not trip `set -e` and
 # skip the checks below.
+wait "$PROBE_PID" 2>/dev/null || true
+PROBE_PID=""
+if [ -r "$QUARANTINE/RUN.json" ]; then
+    say "launch state recorded: $(sed -n 's/.*"apparmor_profile": "\([^"]*\)".*/\1/p' \
+                                        "$QUARANTINE/RUN.json"), seccomp=$(
+                                 sed -n 's/.*"seccomp": "\([^"]*\)".*/\1/p' \
+                                        "$QUARANTINE/RUN.json")"
+else
+    say "WARNING: launch state was not recorded for this run"
+fi
+
 RRC=0
 wait "$RECV_PID" 2>/dev/null || RRC=$?
 RECV_PID=""

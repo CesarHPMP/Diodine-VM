@@ -182,6 +182,25 @@ policy:
           configured out of band. This is a host-configuration property that
           Ironveil can request but not enforce.
 
+  - id: AUD-001
+    claim: Every run records the boundary state that was actually live while it
+           ran, measured from the running VMM rather than declared by the
+           launcher's intent.
+    enforced_by: ironveil-run writes RUN.json into the run's quarantine
+                 directory, reading attr/current, seccomp mode, uid and the
+                 cgroup limits back from the live process
+    verify: RUN.json exists for the run; its observed flag is true; its policy
+            block agrees with the measured vmm fields; and a run where the VMM
+            was never sampled reports "unknown" rather than asserting a state it
+            did not see
+    status: enforced
+    note: Written by the launcher, not the receiver. The receiver cannot observe
+          confinement, so having it restate a launcher claim would launder a
+          launch-side assertion through the one component that faces the guest.
+          Motivated by eight consecutive runs that reported confinement
+          correctly while the profile denied qemu's NUMA probe on every one of
+          them -- nothing on disk recorded either fact.
+
   - id: VMM-001
     claim: The VMM process runs unprivileged and under a seccomp sandbox.
     enforced_by: no sudo anywhere in the launcher; qemu -sandbox on with
