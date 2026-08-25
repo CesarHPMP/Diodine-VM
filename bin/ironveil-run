@@ -273,11 +273,25 @@ record_launch_state() {
         [ -n "$profile" ] || profile="unreadable"
         uid=$(awk '/^Uid:/{print $2}' "/proc/$qpid/status" 2>/dev/null)
         [ -n "$uid" ] || uid=null
-        case "$(awk '/^Seccomp:/{print $2}' "/proc/$qpid/status" 2>/dev/null)" in
-            0) seccomp=disabled ;;
-            1) seccomp=strict ;;
-            2) seccomp=filter ;;
-            *) seccomp=unknown ;;
+        # qemu installs its seccomp filter a short way into startup, so the
+        # first sample can legitimately read 0 on a process that is about to be
+        # sandboxed. Reading once made VMM-001's verdict a race: one run in six
+        # recorded "disabled" while the other five recorded "filter" on the same
+        # binary. Wait briefly for the filter to appear, and only report absence
+        # after the process has had the chance to install one.
+        local mode=0 j
+        for j in $(seq 60); do
+            mode=$(awk '/^Seccomp:/{print $2}' "/proc/$qpid/status" 2>/dev/null)
+            [ -n "$mode" ] || { mode=gone; break; }
+            [ "$mode" != 0 ] && break
+            sleep 0.05
+        done
+        case "$mode" in
+            0)    seccomp=disabled ;;
+            1)    seccomp=strict ;;
+            2)    seccomp=filter ;;
+            gone) seccomp="not observed (vmm exited during sampling)" ;;
+            *)    seccomp=unknown ;;
         esac
     fi
 
