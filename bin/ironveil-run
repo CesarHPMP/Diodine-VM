@@ -35,6 +35,7 @@ PAYLOAD=""
 SAMPLE=""
 ALLOW_RNG=0
 KEEP_RUNDIR=0
+ALLOW_UNCONFINED=0
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 
 say() { printf '\033[1m[ironveil]\033[0m %s\n' "$*" >&2; }
@@ -56,6 +57,10 @@ usage: ironveil-run [options]
   --max-files N         artifact count cap          (default $MAX_FILES)
   --allow-rng           expose virtio-rng to the guest (DEV-005: opt-in, this
                         is a host-to-guest data path and is off by default)
+  --allow-unconfined    run even if the AppArmor profile is not loaded
+                        (VMM-002: without this a run REFUSES to start
+                        unconfined. Load the profile once with
+                        sudo policy/apparmor/install)
   --keep-rundir         do not shred the run directory on exit (debugging)
   -h, --help            this message
 USAGE
@@ -75,6 +80,7 @@ while [ $# -gt 0 ]; do
         --max-artifact)     MAX_ARTIFACT=${2:?}; shift 2 ;;
         --max-files)        MAX_FILES=${2:?}; shift 2 ;;
         --allow-rng)        ALLOW_RNG=1; shift ;;
+        --allow-unconfined) ALLOW_UNCONFINED=1; shift ;;
         --keep-rundir)      KEEP_RUNDIR=1; shift ;;
         -h|--help)          usage 0 ;;
         *)                  echo "unknown option: $1" >&2; usage 1 ;;
@@ -86,6 +92,30 @@ command -v qemu-system-x86_64 >/dev/null || die "qemu-system-x86_64 not found"
 [ -r "$BASE/initramfs" ] || die "no base initramfs; run image/build-base-image first"
 [ -r /dev/kvm ] && [ -w /dev/kvm ] || die "/dev/kvm not accessible to $(id -un)"
 [ "$(id -u)" -ne 0 ] || die "refusing to run as root (TCB-001)"
+
+# VMM-002, decided here with the other preconditions and before anything has a
+# side effect. Refusing after the receiver is up and a quarantine directory
+# exists leaves debris behind for a run that never happened.
+#
+# Detection is by attempting the transition, not by reading the profile set.
+# `aa-status --profiled` and /sys/kernel/security/apparmor/profiles are both
+# root-only and TCB-001 forbids this launcher root, so a readability test reports
+# "not loaded" however the profile is installed -- which made this claim
+# unsatisfiable rather than merely unmet. aa-exec answers it unprivileged.
+APPARMOR_CONFINE=0
+if command -v aa-exec >/dev/null 2>&1 \
+   && aa-exec -p ironveil-qemu -- /bin/true 2>/dev/null; then
+    APPARMOR_CONFINE=1
+elif [ "$ALLOW_UNCONFINED" -eq 0 ]; then
+    # Fail closed. Degrading quietly was the wrong default: the warning went to
+    # stdout, scrolled past, and nothing on disk recorded that a run had no MAC
+    # confinement -- which is how eight consecutive runs went unconfined here
+    # without anyone noticing. Waiving it now has to be said on the command line.
+    say "REFUSING TO RUN: AppArmor profile ironveil-qemu is not loaded (VMM-002)"
+    say "  load it once with:  sudo policy/apparmor/install"
+    say "  or waive it with:   --allow-unconfined  (recorded in RUN.json)"
+    exit 2
+fi
 
 # -------------------------------------------------------------- run scaffold --
 RUNBASE="${XDG_RUNTIME_DIR:-/tmp}/ironveil"
@@ -217,23 +247,16 @@ if [ "$ALLOW_RNG" -eq 1 ]; then
            -device virtio-rng-pci,rng=rng0)
 fi
 
-# VMM-002: apply the AppArmor profile if it has been loaded.
-#
-# Detection is by attempting the transition, not by reading the profile set.
-# Both `aa-status --profiled` and /sys/kernel/security/apparmor/profiles are
-# root-only, and TCB-001 forbids this launcher from having root -- so any
-# readability test reports "not loaded" no matter how the profile is installed,
-# which made VMM-002 unsatisfiable rather than merely unmet. aa-exec answers the
-# real question unprivileged: exit 0 on a loaded profile, and a "profile does
-# not exist" error otherwise.
-LAUNCH=(qemu-system-x86_64)
-if command -v aa-exec >/dev/null 2>&1 \
-   && aa-exec -p ironveil-qemu -- /bin/true 2>/dev/null; then
+# VMM-002 was already decided in the precondition block above, which is the only
+# place that can refuse before anything has a side effect. All that is left here
+# is to act on it.
+if [ "$APPARMOR_CONFINE" -eq 1 ]; then
     LAUNCH=(aa-exec -p ironveil-qemu -- qemu-system-x86_64)
     say "AppArmor: confining under ironveil-qemu (VMM-002)"
 else
-    say "AppArmor: profile ironveil-qemu not loaded; running unconfined (VMM-002 degraded)"
-    say "          load it with: sudo policy/apparmor/install"
+    LAUNCH=(qemu-system-x86_64)
+    say "AppArmor: profile not loaded; proceeding UNCONFINED per --allow-unconfined"
+    say "          (VMM-002 waived for this run, and recorded in RUN.json)"
 fi
 
 # ------------------------------------------------------- launch-state record --
@@ -335,12 +358,16 @@ record_launch_state() {
         printf '    "vcpus": %s,\n' "$CPUS"
         printf '    "cpu_quota_pct": %s,\n' "$CPU_QUOTA"
         printf '    "wall_clock_s": %s,\n' "$TIMEOUT"
-        printf '    "host_entropy_exposed": %s\n' "$([ "$ALLOW_RNG" -eq 1 ] && echo true || echo false)"
+        printf '    "host_entropy_exposed": %s,\n' "$([ "$ALLOW_RNG" -eq 1 ] && echo true || echo false)"
+        printf '    "unconfined_waived": %s\n' "$([ "$ALLOW_UNCONFINED" -eq 1 ] && echo true || echo false)"
         printf '  },\n'
         printf '  "policy": {\n'
         if [ "$observed" = true ]; then
             printf '    "VMM-001": "%s",\n' "$([ "$seccomp" = filter ] && echo live || echo "DEGRADED ($seccomp)")"
-            printf '    "VMM-002": "%s",\n' "$([ "$confined" = true ] && echo live || echo "DEGRADED (unconfined)")"
+            printf '    "VMM-002": "%s",\n' "$([ "$confined" = true ] && echo live \
+                || { [ "$ALLOW_UNCONFINED" -eq 1 ] \
+                     && echo "WAIVED (--allow-unconfined)" \
+                     || echo "DEGRADED (unconfined)"; })"
             printf '    "TCB-001": "%s",\n' "$([ "$uid" != 0 ] && echo live || echo "DEGRADED (uid 0)")"
         else
             printf '    "VMM-001": "unknown (vmm not observed)",\n'

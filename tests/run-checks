@@ -277,5 +277,39 @@ else
     fi
 fi
 
+# ============================================ fail-closed confinement (VMM-002)
+head_ "J. Fail-closed confinement (VMM-002)"
+# Simulate an unloaded profile the way the real thing fails: aa-exec exits
+# nonzero. A stub on PATH does that without a test hook in the launcher, and
+# without needing root to unload the real profile.
+STUB="$TMP/stub"; mkdir -p "$STUB"
+printf '#!/bin/sh\nexit 1\n' > "$STUB/aa-exec"; chmod +x "$STUB/aa-exec"
+
+QBEFORE=$(ls -d quarantine/*/ 2>/dev/null | wc -l)
+PATH="$STUB:$PATH" ./bin/ironveil-run --timeout 20 > "$TMP/failclosed.log" 2>&1
+RC=$?
+if [ "$RC" -eq 2 ] && grep -q "REFUSING TO RUN" "$TMP/failclosed.log"; then
+    ok "VMM-002" "run refuses to start with no profile loaded (exit 2)"
+else
+    bad "VMM-002" "unconfined run was not refused (exit $RC)"
+fi
+
+# A refusal must not leave a half-built run behind.
+QAFTER=$(ls -d quarantine/*/ 2>/dev/null | wc -l)
+check VMM-002 "refused run leaves no quarantine directory" "$QAFTER" "$QBEFORE"
+
+# And the waiver must work, be explicit, and be recorded -- an escape hatch that
+# cannot be exercised is as bad as a default that cannot be refused.
+PATH="$STUB:$PATH" ./bin/ironveil-run --allow-unconfined --timeout 90 \
+    > "$TMP/waived.log" 2>&1
+WD=$(ls -td quarantine/*/ | head -1)
+if grep -q "UNCONFINED" "$TMP/waived.log" \
+   && grep -q '"unconfined_waived": true' "$WD/RUN.json" 2>/dev/null \
+   && grep -q 'WAIVED (--allow-unconfined)' "$WD/RUN.json" 2>/dev/null; then
+    ok "VMM-002" "waiver runs unconfined and records the waiver in RUN.json"
+else
+    bad "VMM-002" "waiver did not run or did not record itself"
+fi
+
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

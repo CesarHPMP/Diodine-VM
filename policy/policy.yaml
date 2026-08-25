@@ -328,16 +328,31 @@ policy:
             so qemu-system-x86_64 cannot be matched by name, and a command-line
             match will match the searching process itself. Confined runs read
             "ironveil-qemu (enforce)".
-    status: partial
-    note: Requires the profile to be loaded once with root. The launcher warns
-          and continues if it is absent, so this degrades rather than blocks.
-          Detection must NOT read the profile set -- aa-status --profiled and
-          /sys/kernel/security/apparmor/profiles are both root-only, and TCB-001
-          forbids this launcher root, so a readability check reports "not loaded"
-          however the profile is installed. That made this claim unsatisfiable
-          rather than merely unmet until the launcher switched to detecting by
-          attempted transition. Verified in enforce mode on the development host;
-          the profile itself has been exercised on no other.
+    status: enforced
+    note: |
+      Fail-closed. A run whose profile is not loaded REFUSES to start and exits
+      2, before the receiver is up or a quarantine directory exists, so a refused
+      run leaves no debris. Waiving it requires --allow-unconfined on the command
+      line, and the waiver is recorded in the run's own RUN.json as
+      "unconfined_waived" with VMM-002 reading "WAIVED (--allow-unconfined)".
+
+      This was status partial while the launcher warned and continued. That
+      default was wrong for the reason it always is -- the warning went to
+      stdout, scrolled past, and nothing on disk recorded that a run had no MAC
+      confinement. Eight consecutive runs here went unconfined without anyone
+      noticing. Silence is not the failure mode you want from a boundary.
+
+      Detection must NOT read the profile set. aa-status --profiled and
+      /sys/kernel/security/apparmor/profiles are both root-only, and TCB-001
+      forbids this launcher root, so a readability check reports "not loaded"
+      however the profile is installed -- which made this claim unsatisfiable
+      rather than merely unmet, and would now make it refuse every run. Detection
+      is by attempted transition, which needs no privilege.
+
+      Still host-provisioned: the profile has to be loaded once with
+      sudo policy/apparmor/install, and it has been exercised on the development
+      host only. What changed is that an unprovisioned host now stops instead of
+      quietly proceeding.
 
   - id: TCB-001
     claim: No root-privileged daemon is introduced into the trusted computing

@@ -13,9 +13,15 @@ tested rather than deployed. Do not put live malware in it (see *Scope* below).
 
 ```sh
 ./image/build-base-image        # once: ~48 MB of downloads, checksum-verified
+sudo policy/apparmor/install    # once: load the VMM confinement profile
 ./bin/ironveil-run              # boot a disposable VM, run the default probe
 ./tests/run-checks              # verify the boundary is configured as claimed
 ```
+
+The `install` step is not optional. Without the profile loaded, a run **refuses
+to start** and exits 2 (`VMM-002` is fail-closed). If you genuinely want to run
+without MAC confinement, `--allow-unconfined` says so explicitly and the waiver
+is recorded in that run's `RUN.json`.
 
 Analysing something:
 
@@ -87,13 +93,14 @@ charged against a single global budget so a bomb cannot buy room by nesting.
 
 ## What is and is not enforced
 
-Verified by `tests/run-checks` (38 checks): no network interface, no USB, no
+Verified by `tests/run-checks` (41 checks): no network interface, no USB, no
 graphics, no shared folders, no block device, one sanctioned virtio port, no
 host entropy source, guest-side readback yields nothing, export caps enforced
 mid-stream, wall-clock destruction of a non-cooperative guest, base image
 byte-identical after a run, ingest refusal of zip bombs, path traversal and
 symlink members, every run recording its own measured confinement state, and
-host records surviving a guest that emits artifacts named after them.
+host records surviving a guest that emits artifacts named after them, and a run
+refusing to start at all when the confinement profile is missing.
 
 Known gaps, all recorded in `policy/policy.yaml`:
 
@@ -101,7 +108,6 @@ Known gaps, all recorded in `policy/policy.yaml`:
 | --- | --- |
 | `OUT-002` | The channel is directional, not perfectly one-way. **Measured** (`tests/out002/`): buffer depth 585728 bytes, detection floor ~8 ms, and ~450 symbols per run — capacity is bounded by `RES-006`'s byte cap, since each symbol costs the guest ~0.56 MiB of export budget. Raising `--max-total` raises it proportionally. |
 | `RES-008` | Nothing bounds quarantine growth **across** runs. `RES-006` caps one run at 256 MB; the number of runs is a retention question for the operator. |
-| `VMM-002` | AppArmor confinement requires loading the profile once as root (`sudo policy/apparmor/install`). Without it, runs proceed unconfined and say so. |
 | `QUAR-001` | Quarantine exclusion markers are advisory. Any indexer, AV, or backup agent that ignores them must be configured out of band. |
 | `RES-007` | The guest console writes straight to a host file, outside the export caps. Measured at ~50 KB/s (the emulated UART is the limit), so ~9 MB at the default budget — bounded by the wall clock, not by a cap. Account for it if you raise `--timeout` into the hours. |
 | `PLAT-001` | Microarchitectural side channels are inherited from the platform and out of scope. |
