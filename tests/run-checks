@@ -195,7 +195,12 @@ else
     sed -n '/^record_launch_state() {/,/^}$/p' bin/ironveil-run \
       | sed -e 's|/sys/fs/cgroup/user.slice/user-$(id -u).slice|/nonexistent/cgroup|' \
             -e 's|seq 400|seq 2|' > "$FB.fn"
-    ( RUN_ID=AUD-001-fallback MEM_MB=1 CPUS=1 CPU_QUOTA=1 TIMEOUT=1 ALLOW_RNG=0
+    # Every variable the recorder reads has to be supplied here. The harness runs
+    # under `set -u`, so a new field in RUN.json that reads an unset variable
+    # makes the recorder write nothing and this check fail -- which is how
+    # QUAR-001's field was caught. Keep this list in step with the record.
+    ( RUN_ID=AUD-001-fallback MEM_MB=1 CPUS=1 CPU_QUOTA=1 TIMEOUT=1 ALLOW_RNG=0 \
+      ALLOW_UNCONFINED=0 QUAR_CONSUMERS=""
       . "$FB.fn"
       record_launch_state "$FB.json" ) 2>/dev/null
     if [ ! -r "$FB.json" ]; then
@@ -309,6 +314,60 @@ if grep -q "UNCONFINED" "$TMP/waived.log" \
     ok "VMM-002" "waiver runs unconfined and records the waiver in RUN.json"
 else
     bad "VMM-002" "waiver did not run or did not record itself"
+fi
+
+# ================================ retention and consumer visibility (RES-008/QUAR-001)
+head_ "K. Retention and consumer visibility (RES-008, QUAR-001)"
+# comm is taken from the executable's name, so a copy of sleep named clamd
+# presents to the scanner as clamd. A genuine positive with no hook in the
+# launcher, and the only way to know the scanner can fire at all -- a detector
+# tested only on a clean host is a detector that has never been tested.
+# Launch it on its own line. `cp ... && decoy &` backgrounds the whole AND-list,
+# so $! is the subshell's pid and killing that leaves the decoy running -- which
+# it did, and the "must go quiet" check below duly failed against a clamd the
+# previous check had orphaned.
+cp /bin/sleep "$TMP/clamd" 2>/dev/null || true
+"$TMP/clamd" 120 &
+DECOY=$!
+sleep 0.3
+
+./bin/ironveil-run --timeout 60 --quarantine-warn-mb 0 > "$TMP/loud.log" 2>&1
+if grep -q "QUAR-001 WARNING" "$TMP/loud.log"; then
+    ok "QUAR-001" "a running consumer is detected and reported"
+else
+    bad "QUAR-001" "consumer scan missed a process named clamd"
+fi
+LD=$(ls -td quarantine/*/ | head -1)
+if grep -q '"quarantine_consumers_running": "clamd"' "$LD/RUN.json" 2>/dev/null; then
+    ok "QUAR-001" "the run records which consumers were live"
+else
+    bad "QUAR-001" "consumer state absent from RUN.json"
+fi
+if grep -q "RES-008 WARNING" "$TMP/loud.log"; then
+    ok "RES-008" "cumulative size warning fires at its threshold"
+else
+    bad "RES-008" "size warning did not fire with a 0 MB threshold"
+fi
+
+kill $DECOY 2>/dev/null; wait $DECOY 2>/dev/null
+# Confirm it is actually gone before asserting silence, so a surviving decoy
+# reports itself here rather than as a mystery failure two checks later.
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -d "/proc/$DECOY" ] || break
+    sleep 0.2
+done
+[ -d "/proc/$DECOY" ] && bad "QUAR-001" "test decoy survived the kill; silence check is unreliable"
+
+# ...and must go quiet again, or it is an alarm that says nothing.
+./bin/ironveil-run --timeout 60 --quarantine-warn-mb 1000000 > "$TMP/quiet.log" 2>&1
+if grep -q "QUAR-001 WARNING" "$TMP/quiet.log"; then
+    bad "QUAR-001" "warned with no consumer running"
+elif grep -q "RES-008 WARNING" "$TMP/quiet.log"; then
+    bad "RES-008" "warned below its threshold"
+elif grep -q "quarantine total:" "$TMP/quiet.log"; then
+    ok "RES-008" "reports the total quietly when under threshold"
+else
+    bad "RES-008" "no cumulative total reported at all"
 fi
 
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$PASS" "$FAIL"

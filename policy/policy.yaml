@@ -202,16 +202,33 @@ policy:
   - id: RES-008
     claim: Quarantine growth across runs is bounded by operator retention policy,
            not by Ironveil.
-    enforced_by: nothing -- RES-006 caps a single run at 256 MB and nothing caps
-                 the number of runs
-    verify: not verified by Ironveil. The operator decides how long run
-            directories live
+    enforced_by: nothing bounds it -- RES-006 caps a single run at 256 MB and
+                 nothing caps the number of runs. The launcher reports the
+                 cumulative total after every run and warns past
+                 --quarantine-warn-mb, default 5000
+    verify: a run with --quarantine-warn-mb 0 warns; a run under the threshold
+            still reports the total
     status: not-enforced
-    note: Surfaced while re-examining RES-004. Per-run bounds were all in place
-          and the cross-run total had simply never been stated, which is the kind
-          of gap that only becomes visible when a claim is rewritten. Related to
-          QUAR-001, which covers what must not read those directories rather than
-          how long they persist.
+    note: |
+      Reporting is not a bound and the status stays not-enforced. What changed is
+      that the number is now impossible to miss, which is the most Ironveil can
+      honestly do here.
+
+      Nothing prunes automatically, deliberately. Auto-deleting quarantined
+      output is the kind of helpfulness that destroys the evidence someone came
+      back for, and the caps that matter per-run all already hold. Retention is
+      an operator decision; the tool's job is to make the figure visible.
+
+      Surfaced while re-examining RES-004 -- the per-run bounds were all in place
+      and the cross-run total had simply never been stated, the kind of gap that
+      only appears when a claim is rewritten. Then it demonstrated itself: one
+      afternoon of testing put 4.8 GB across 76 runs into quarantine, 4 GB of it
+      six OUT-002 carrier runs at 514 MB each. Every per-run cap held throughout
+      and it was still the largest resource event of the session. Cumulative size
+      is the signal that would have flagged it; run count would not have.
+
+      Related to QUAR-001, which covers what must not read those directories
+      rather than how long they persist.
 
   - id: RES-005
     claim: A run cannot exceed its wall-clock budget.
@@ -265,12 +282,35 @@ policy:
   - id: QUAR-001
     claim: Quarantine storage is excluded from automatic consumers (indexers,
            thumbnailers, antivirus, backup).
-    enforced_by: exclusion markers written into the quarantine root
-    verify: markers present; consumer configuration reviewed per host
+    enforced_by: exclusion markers written into the quarantine root, plus a
+                 startup scan that names any indexer, thumbnailer, antivirus or
+                 backup agent currently running. The scan warns and never blocks,
+                 and its result is recorded in the run's RUN.json
+    verify: markers present; a process whose comm matches a watched consumer makes
+            the run warn and appear in RUN.json as
+            quarantine_consumers_running; a host with none stays quiet
     status: partial
-    note: Markers are advisory. Any consumer that ignores them must be
-          configured out of band. This is a host-configuration property that
-          Ironveil can request but not enforce.
+    note: |
+      Markers are advisory and always will be -- Ironveil cannot make a
+      third-party agent honour them. Detection is the honest ceiling: it converts
+      a silent weakness into a visible one, per run, in the run's own record.
+
+      It warns rather than refusing, unlike VMM-002. These are host-wide desktop
+      services that Ironveil cannot reconfigure, and refusing to run on any
+      machine with a file indexer would make the tool unusable without making the
+      quarantine any safer. Fail-closed is right when the tool can fix the
+      condition or the operator can; neither holds here.
+
+      Real enforcement is a host decision and out of Ironveil's reach: a dedicated
+      filesystem for quarantine mounted nodev, nosuid, noexec, plus per-tool
+      exclusions. On the development host quarantine sits on / with plain
+      rw,relatime, so nothing structural separates it from the rest of the home
+      directory.
+
+      The scan matches on /proc/<pid>/comm, never on cmdline. A cmdline match
+      finds the process doing the matching, whose own arguments contain every
+      name in the watch list -- that exact mistake reported all six watched
+      consumers as running on a host with none of them.
 
   - id: AUD-001
     claim: Every run records the boundary state that was actually live while it

@@ -36,6 +36,7 @@ SAMPLE=""
 ALLOW_RNG=0
 KEEP_RUNDIR=0
 ALLOW_UNCONFINED=0
+QUARANTINE_WARN_MB=5000
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 
 say() { printf '\033[1m[ironveil]\033[0m %s\n' "$*" >&2; }
@@ -61,6 +62,9 @@ usage: ironveil-run [options]
                         (VMM-002: without this a run REFUSES to start
                         unconfined. Load the profile once with
                         sudo policy/apparmor/install)
+  --quarantine-warn-mb N  warn when cumulative quarantine size exceeds N MB
+                        (RES-008, default 5000; 0 warns always). Reports only --
+                        nothing here ever deletes quarantined output
   --keep-rundir         do not shred the run directory on exit (debugging)
   -h, --help            this message
 USAGE
@@ -81,6 +85,7 @@ while [ $# -gt 0 ]; do
         --max-files)        MAX_FILES=${2:?}; shift 2 ;;
         --allow-rng)        ALLOW_RNG=1; shift ;;
         --allow-unconfined) ALLOW_UNCONFINED=1; shift ;;
+        --quarantine-warn-mb) QUARANTINE_WARN_MB="$2"; shift 2 ;;
         --keep-rundir)      KEEP_RUNDIR=1; shift ;;
         -h|--help)          usage 0 ;;
         *)                  echo "unknown option: $1" >&2; usage 1 ;;
@@ -102,6 +107,43 @@ command -v qemu-system-x86_64 >/dev/null || die "qemu-system-x86_64 not found"
 # root-only and TCB-001 forbids this launcher root, so a readability test reports
 # "not loaded" however the profile is installed -- which made this claim
 # unsatisfiable rather than merely unmet. aa-exec answers it unprivileged.
+# QUAR-001. The exclusion markers in quarantine/ are advisory and always will be
+# -- Ironveil cannot make a third-party agent honour them. What it CAN do is say
+# whether any such agent is running right now, which turns a silent weakness into
+# a visible one. This warns and never blocks: these are host-wide desktop
+# services, and refusing to run on any machine with a file indexer would make the
+# tool unusable without making the quarantine any safer.
+#
+# Matched on /proc/<pid>/comm, never on cmdline. A cmdline match finds the
+# process doing the matching, whose own arguments contain every name in the list
+# -- that mistake reported all six of these as running on a host with none of
+# them. comm truncates at 15 characters, so the patterns are compared as prefixes.
+QUAR_CONSUMERS=""
+quar_scan() {
+    local watch="tracker-miner tracker-extract tracker-store baloo_file
+                 baloop thumbnail tumblerd clamd freshclam clamonacc updatedb
+                 mandb duplicati restic borgbackup deja-dup rsnapshot"
+    local d comm w found=""
+    for d in /proc/[0-9]*; do
+        comm=$(cat "$d/comm" 2>/dev/null) || continue
+        for w in $watch; do
+            case "$comm" in
+                "$(printf '%.15s' "$w")"*)
+                    case " $found " in *" $comm "*) ;; *) found="$found $comm" ;; esac
+                    ;;
+            esac
+        done
+    done
+    printf '%s' "${found# }"
+}
+QUAR_CONSUMERS=$(quar_scan)
+if [ -n "$QUAR_CONSUMERS" ]; then
+    say "QUAR-001 WARNING: these read files automatically and ignore the"
+    say "                  advisory exclusion markers unless configured:"
+    say "                    $QUAR_CONSUMERS"
+    say "                  configure them to skip $ROOT/quarantine out of band."
+fi
+
 APPARMOR_CONFINE=0
 if command -v aa-exec >/dev/null 2>&1 \
    && aa-exec -p ironveil-qemu -- /bin/true 2>/dev/null; then
@@ -359,7 +401,8 @@ record_launch_state() {
         printf '    "cpu_quota_pct": %s,\n' "$CPU_QUOTA"
         printf '    "wall_clock_s": %s,\n' "$TIMEOUT"
         printf '    "host_entropy_exposed": %s,\n' "$([ "$ALLOW_RNG" -eq 1 ] && echo true || echo false)"
-        printf '    "unconfined_waived": %s\n' "$([ "$ALLOW_UNCONFINED" -eq 1 ] && echo true || echo false)"
+        printf '    "unconfined_waived": %s,\n' "$([ "$ALLOW_UNCONFINED" -eq 1 ] && echo true || echo false)"
+        printf '    "quarantine_consumers_running": "%s"\n' "$QUAR_CONSUMERS"
         printf '  },\n'
         printf '  "policy": {\n'
         if [ "$observed" = true ]; then
@@ -374,10 +417,13 @@ record_launch_state() {
             printf '    "VMM-002": "unknown (vmm not observed)",\n'
             printf '    "TCB-001": "unknown (vmm not observed)",\n'
         fi
-        printf '    "RES-004": "%s",\n' "$([ "$cg_io" = present ] && echo live \
-            || { [ "$cg_io" = absent ] && echo "not-enforced (no io controller)" \
-                 || echo "unknown (cgroup not observed)"; })"
-        printf '    "DEV-005": "%s"\n' "$([ "$ALLOW_RNG" -eq 1 ] && echo "DEGRADED (host entropy exposed)" || echo live)"
+        # RES-004 is structural now, not a cgroup reading: the guest has no block
+        # device, so there is no guest disk I/O to cap. io.max presence is still
+        # recorded under "cgroup" above, but it is not what decides this claim.
+        printf '    "RES-004": "live (no block device)",\n'
+        printf '    "DEV-005": "%s",\n' "$([ "$ALLOW_RNG" -eq 1 ] && echo "DEGRADED (host entropy exposed)" || echo live)"
+        printf '    "QUAR-001": "%s"\n' "$([ -n "$QUAR_CONSUMERS" ] \
+            && echo "DEGRADED (consumers running)" || echo "advisory (none detected)")"
         printf '  }\n'
         printf '}\n'
     } > "$out.partial" 2>/dev/null && mv "$out.partial" "$out" && chmod 0400 "$out"
@@ -448,6 +494,29 @@ esac
 
 say "artifacts: $QUARANTINE"
 ls -l "$QUARANTINE" >&2 || true
+
+# RES-008. Per-run bounds all hold; what nothing bounds is the number of runs.
+# Reported after the run so the figure includes what this one just added.
+#
+# This only ever reports. Auto-pruning quarantined output would be the kind of
+# helpfulness that destroys the evidence someone came back for -- retention is an
+# operator decision, and the tool's job is to make the number impossible to miss
+# rather than to act on it.
+QUAR_ROOT="$ROOT/quarantine"
+QUAR_BYTES=$(du -sb "$QUAR_ROOT" 2>/dev/null | cut -f1)
+QUAR_RUNS=$(find "$QUAR_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+if [ -n "$QUAR_BYTES" ]; then
+    QUAR_MB=$((QUAR_BYTES / 1024 / 1024))
+    if [ "$QUAR_MB" -ge "$QUARANTINE_WARN_MB" ]; then
+        say "RES-008 WARNING: quarantine holds ${QUAR_MB} MB across ${QUAR_RUNS} run(s),"
+        say "                 at or over the ${QUARANTINE_WARN_MB} MB mark. Nothing bounds"
+        say "                 growth across runs; prune what you no longer need:"
+        say "                   find quarantine -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +"
+        say "                 (that form leaves the exclusion markers in place)"
+    else
+        say "quarantine total: ${QUAR_MB} MB across ${QUAR_RUNS} run(s) (RES-008)"
+    fi
+fi
 
 # 0 = nominal, 3 = the receiver enforced a cap (the boundary did its job and
 # the caller should know), other = receiver malfunction.
