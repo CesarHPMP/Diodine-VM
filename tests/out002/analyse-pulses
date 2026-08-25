@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""OUT-002 -- score commanded stall durations against what the guest measured.
+
+Each host stall appears in the guest as ONE blocking write whose duration is the
+stall length, so the channel is naturally pulse-width, and its capacity is set
+by how short a stall the guest can still resolve. Command known durations, see
+what comes back.
+
+Reports, per commanded duration: how many pulses were seen, and the error
+between commanded and measured. The shortest duration that is both reliably
+detected and cleanly separated from its neighbours is the symbol quantum, and
+the bitrate follows from it.
+"""
+import argparse
+import statistics
+import sys
+
+
+def load_pulses(path):
+    out = []
+    for line in open(path):
+        if line.startswith("#"):
+            continue
+        t, cmd, actual = line.split()
+        out.append((float(t), int(cmd), float(actual)))
+    return out
+
+
+def load_events(path, threshold_ms):
+    """Blocking writes, as (guest_time_s, blocked_ms)."""
+    ev = []
+    for line in open(path):
+        if line.startswith("#"):
+            continue
+        t_us, lat_us = line.split()
+        lat_ms = int(lat_us) / 1000.0
+        if lat_ms > threshold_ms:
+            ev.append((int(t_us) / 1e6, lat_ms))
+    return ev
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--schedule", required=True)
+    ap.add_argument("--latency", required=True)
+    ap.add_argument("--threshold-ms", type=float, default=2.0)
+    args = ap.parse_args()
+
+    pulses = load_pulses(args.schedule)
+    events = load_events(args.latency, args.threshold_ms)
+    if not pulses:
+        print("no pulses in schedule", file=sys.stderr)
+        return 2
+
+    print(f"commanded {len(pulses)} pulses; guest saw {len(events)} blocking writes "
+          f"above {args.threshold_ms}ms")
+    if not events:
+        print("=> nothing detected: at this pacing the FIFO never filled")
+        return 1
+
+    # Align by order. Both sequences are monotonic in time and the guest sees at
+    # most one event per pulse, so greedy in-order matching is sound as long as
+    # the counts are close. Report the discrepancy rather than forcing a match.
+    n = min(len(pulses), len(events))
+    by_cmd = {}
+    for (_, cmd, actual), (_, measured) in zip(pulses[:n], events[:n]):
+        by_cmd.setdefault(cmd, []).append((actual, measured))
+
+    print()
+    print(f"{'commanded':>10} {'n':>3} {'host actual':>12} {'guest saw':>12} "
+          f"{'error':>9} {'spread':>8}")
+    quantum = None
+    for cmd in sorted(by_cmd):
+        rows = by_cmd[cmd]
+        acts = [a for a, _ in rows]
+        meas = [m for _, m in rows]
+        err = statistics.mean(m - a for a, m in rows)
+        spread = statistics.pstdev(meas) if len(meas) > 1 else 0.0
+        print(f"{cmd:>8}ms {len(rows):>3} {statistics.mean(acts):>10.2f}ms "
+              f"{statistics.mean(meas):>10.2f}ms {err:>+8.2f}ms {spread:>7.2f}ms")
+        # n >= 3 or this is not evidence. With one sample the spread is 0 by
+        # construction and the test cannot fail -- which it duly did on the
+        # first run, declaring a 10ms pulse "cleanly resolved" from a single
+        # measurement that was off by +35ms.
+        # The error must also be small relative to the pulse: three pulses of
+        # 10, 20 and 50ms all reading ~45ms means the guest is measuring the
+        # buffer, not the signal.
+        if (len(rows) >= 3 and spread < cmd * 0.25
+                and abs(err) < cmd * 0.5 and quantum is None):
+            quantum = cmd
+
+    print()
+    if len(events) < len(pulses):
+        print(f"note: {len(pulses) - len(events)} commanded pulses produced no "
+              f"blocking write -- below the detection floor at this pacing")
+    if quantum:
+        print(f"smallest cleanly-resolved pulse : {quantum} ms")
+        print(f"=> symbol rate at that quantum   : ~{1000.0 / quantum:.0f} symbols/s")
+        print(f"=> on-off keying gives           : ~{1000.0 / quantum:.0f} bits/s")
+        print("   (pulse-width encoding carries several bits per symbol, so this "
+              "is a floor, not a ceiling)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

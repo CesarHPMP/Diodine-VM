@@ -8,3 +8,6 @@ image/base/
 *.sock
 *.pid
 *.log
+
+# Test tooling build artifacts (source is committed, binaries are not).
+tests/out002/probe

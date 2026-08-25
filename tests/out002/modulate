@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""OUT-002 measurement -- host side transmitter.
+
+Transmits a bit pattern to the guest using nothing but the receiver's
+scheduling. SIGSTOP the receiver and it stops draining iv.out; the 64KB FIFO
+fills, QEMU stops draining the virtqueue, and the guest's write() blocks.
+SIGCONT releases it.
+
+This needs no change to any shipped component, which is the point: the reverse
+channel is a property of the architecture, not of a bug in the receiver. If it
+could only be demonstrated by modifying the receiver it would not be OUT-002.
+
+    tests/out002/modulate --period-ms 500 --bits 1010110010 --out schedule.txt
+
+Always SIGCONTs on the way out. A receiver left stopped never writes its
+manifest and the run reports a spurious failure.
+"""
+import argparse
+import os
+import random
+import signal
+import sys
+import time
+
+
+def log(msg):
+    print(f"[modulate] {msg}", file=sys.stderr, flush=True)
+
+
+def find_reader(timeout_s):
+    """Find the process that actually holds an iv.out FIFO open for reading.
+
+    Identify it by its open file descriptors, not by its command line. Matching
+    on cmdline found the pyenv shim -- `bash pyenv-exec python3 .../ironveil-
+    receiver` -- whose argv contains the receiver's path while the process doing
+    the reading is its child. SIGSTOP on the wrapper stops nothing, the reader
+    keeps draining, and every measurement built on it silently describes an
+    undisturbed channel. That invalidated a whole afternoon of arms here.
+
+    Descriptor ownership cannot lie in that way: the reader is whoever has the
+    FIFO open, which is the same argument OUT-001 itself rests on.
+    """
+    me = os.getpid()
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            if pid == me:
+                continue
+            fddir = f"/proc/{pid}/fd"
+            try:
+                fds = os.listdir(fddir)
+            except OSError:
+                continue
+            for fd in fds:
+                try:
+                    target = os.readlink(f"{fddir}/{fd}")
+                except OSError:
+                    continue
+                if target.endswith("/iv.out") and "/ironveil/" in target:
+                    return pid
+        time.sleep(0.05)
+    return None
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--period-ms", type=int, default=500,
+                    help="symbol period; the thing we are measuring")
+    ap.add_argument("--bits", help="explicit bit string, e.g. 101100")
+    ap.add_argument("--random-bits", type=int, default=0)
+    ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--pulses", help="comma-separated stall durations in ms, e.g. 10,20,50")
+    ap.add_argument("--repeat", type=int, default=4)
+    ap.add_argument("--gap-ms", type=int, default=120)
+    ap.add_argument("--out", default="schedule.txt")
+    ap.add_argument("--wait-s", type=float, default=30.0)
+    args = ap.parse_args()
+
+    bits = []
+    if args.pulses:
+        pass
+    elif args.bits:
+        bits = [int(c) for c in args.bits if c in "01"]
+    elif args.random_bits:
+        rng = random.Random(args.seed)
+        bits = [rng.randint(0, 1) for _ in range(args.random_bits)]
+    else:
+        ap.error("pass --pulses, --bits or --random-bits")
+
+    pid = find_reader(args.wait_s)
+    if pid is None:
+        log("no FIFO reader found; is a run in progress?")
+        return 2
+
+    # --- pulse mode ----------------------------------------------------------
+    # What bounds this channel is not on-off keying per symbol window -- each
+    # host stall shows up in the guest as exactly ONE blocking write whose
+    # duration is the stall length. So the quantity that decides capacity is how
+    # short a stall the guest can still resolve. Command known durations and
+    # let the analyser compare them against what the guest measured.
+    if args.pulses:
+        want = [int(x) for x in args.pulses.split(",") if x.strip()]
+        log(f"receiver pid {pid}, pulses {want} x{args.repeat}, gap {args.gap_ms}ms")
+        sent = []
+        t0 = time.monotonic()
+        try:
+            for _ in range(args.repeat):
+                for d in want:
+                    os.kill(pid, signal.SIGSTOP)
+                    a = time.monotonic()
+                    time.sleep(d / 1000.0)
+                    os.kill(pid, signal.SIGCONT)
+                    b = time.monotonic()
+                    sent.append((a - t0, d, (b - a) * 1000.0))
+                    time.sleep(args.gap_ms / 1000.0)
+        except ProcessLookupError:
+            log("receiver exited mid-transmission")
+        finally:
+            try:
+                os.kill(pid, signal.SIGCONT)
+                log("receiver resumed")
+            except ProcessLookupError:
+                pass
+        with open(args.out, "w") as fh:
+            fh.write("# pulse mode\n# t_s commanded_ms actual_ms\n")
+            for t, d, act in sent:
+                fh.write(f"{t:.6f} {d} {act:.3f}\n")
+        log(f"{len(sent)} pulses written to {args.out}")
+        return 0
+
+    log(f"receiver pid {pid}, {len(bits)} bits at {args.period_ms}ms")
+
+    period = args.period_ms / 1000.0
+    rows = []
+    t0 = time.monotonic()
+    try:
+        for i, bit in enumerate(bits):
+            # 1 = drain (receiver running), 0 = stall (receiver stopped)
+            os.kill(pid, signal.SIGCONT if bit else signal.SIGSTOP)
+            rows.append((time.monotonic() - t0, bit))
+            # Absolute deadlines, so symbol timing does not drift.
+            target = t0 + (i + 1) * period
+            while True:
+                left = target - time.monotonic()
+                if left <= 0:
+                    break
+                time.sleep(min(left, 0.005))
+    except ProcessLookupError:
+        log("receiver exited mid-transmission")
+    finally:
+        try:
+            os.kill(pid, signal.SIGCONT)
+            log("receiver resumed")
+        except ProcessLookupError:
+            pass
+
+    with open(args.out, "w") as fh:
+        fh.write(f"# period_ms {args.period_ms}\n")
+        fh.write("# t_s bit\n")
+        for t, bit in rows:
+            fh.write(f"{t:.6f} {bit}\n")
+    log(f"schedule written to {args.out}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

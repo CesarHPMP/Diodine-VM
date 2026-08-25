@@ -99,10 +99,11 @@ Known gaps, all recorded in `policy/policy.yaml`:
 
 | ID | Gap |
 | --- | --- |
-| `OUT-002` | The channel is directional, not perfectly one-way. Flow control is a low-bandwidth reverse channel. Phase 2 must **measure** it, not assume it is zero. |
-| `RES-004` | Disk I/O bandwidth is uncapped: the `io` cgroup controller is not delegated to the user slice, so an unprivileged scope cannot set it. |
+| `OUT-002` | The channel is directional, not perfectly one-way. **Measured** (`tests/out002/`): buffer depth 585728 bytes, detection floor ~8 ms, and ~450 symbols per run — capacity is bounded by `RES-006`'s byte cap, since each symbol costs the guest ~0.56 MiB of export budget. Raising `--max-total` raises it proportionally. |
+| `RES-008` | Nothing bounds quarantine growth **across** runs. `RES-006` caps one run at 256 MB; the number of runs is a retention question for the operator. |
 | `VMM-002` | AppArmor confinement requires loading the profile once as root (`sudo policy/apparmor/install`). Without it, runs proceed unconfined and say so. |
 | `QUAR-001` | Quarantine exclusion markers are advisory. Any indexer, AV, or backup agent that ignores them must be configured out of band. |
+| `RES-007` | The guest console writes straight to a host file, outside the export caps. Measured at ~50 KB/s (the emulated UART is the limit), so ~9 MB at the default budget — bounded by the wall clock, not by a cap. Account for it if you raise `--timeout` into the hours. |
 | `PLAT-001` | Microarchitectural side channels are inherited from the platform and out of scope. |
 
 ## Layout

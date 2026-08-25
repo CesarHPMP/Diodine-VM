@@ -9,7 +9,12 @@
 #   claim       what the system asserts
 #   enforced_by where the enforcement actually lives
 #   verify      how Phase 2 checks it
-#   status      enforced | partial | not-enforced | inherited
+#   status      enforced | partial | not-enforced | inherited | measured
+#
+# "measured" is for a limitation that is real, quantified, and bounded by
+# something -- as distinct from "not-enforced", which is a limitation nobody has
+# put a number on yet. Moving a statement from not-enforced to measured requires
+# the numbers and the method to reproduce them, in the note.
 
 version: 1
 phase: 1
@@ -104,11 +109,51 @@ policy:
 
   - id: OUT-002
     claim: The output channel is not perfectly one-way. Flow control forms a
-           low-bandwidth reverse channel.
-    enforced_by: nothing — this is a stated limitation, not a guarantee
-    verify: Phase 2 must MEASURE the achievable reverse bandwidth rather than
-            assume it is zero
-    status: not-enforced
+           reverse channel, and its per-run capacity is bounded by RES-006's byte
+           cap at a few hundred bits.
+    enforced_by: RES-006 -- not by design, but because every symbol the guest can
+                 read costs it export budget. Detecting one stall requires
+                 refilling the buffer between write() and read(), measured at
+                 585728 bytes, so the default 256 MB total cap allows on the
+                 order of 450 detections per run whatever the symbol rate
+    verify: tests/out002 -- a static probe writes a carrier and times each
+            write(); the host transmits by SIGSTOP/SIGCONT on whichever process
+            holds iv.out open. See the note for the numbers to reproduce
+    status: measured
+    note: |
+      Measured on the development host, replacing the earlier estimate of "a few
+      bits per second" in ironveil.md, which was a guess in the wrong direction.
+
+        buffer depth       585728 bytes (0.56 MiB), identical across runs
+        detection floor    ~8 ms, the time to refill that buffer at ~73 MB/s
+        long-stall fidelity  19.02 s measured against 20.00 s commanded; five
+                             repeats of one 3-symbol stall landed within 3 ms
+        short pulses       10/20/50 ms all read back as 15-32 ms with 5-11 ms
+                           spread, and the guest sees MORE blocking writes than
+                           were commanded
+        per-run capacity   ~450 symbols, byte-capped, not time-capped
+
+      The short-pulse noise is the interesting part. At full speed the receiver
+      cannot keep up -- it hashes and writes to disk -- so it stalls on its own,
+      producing blocking writes indistinguishable from signal and of the same
+      magnitude. The channel is self-noisy at the rate that would make it fast.
+      Writing slowly enough to quiet that noise enlarges the refill time and
+      lowers the symbol rate, and the guest cannot escape the trade.
+
+      What bounds this is a control that already existed for another reason. No
+      new mechanism is proposed: raising --max-total raises this channel's
+      capacity proportionally, which is worth knowing before anyone raises it.
+
+      Two things this measurement got wrong before the instrument was fixed, both
+      worth keeping as warnings. Modulating by SIGSTOP on a process matched by
+      command line stopped the pyenv shim -- bash pyenv-exec python3 receiver --
+      whose argv contains the receiver path while its child does the reading. The
+      reader kept draining, and the arms built on it reported no backpressure at
+      all, up to 512 MB. Identifying the reader by which process holds the FIFO
+      open fixed it, which is the same argument OUT-001 rests on. Separately, the
+      pulse analyser paired commanded and observed events in order, so a single
+      missed pulse shifted every later pair and made a 100 ms stall read as
+      39 ms. One duration per run removes the ambiguity.
 
   - id: OUT-003
     claim: The receiver never parses artifact content.
@@ -136,13 +181,37 @@ policy:
     status: enforced
 
   - id: RES-004
-    claim: Guest disk I/O bandwidth is capped.
-    enforced_by: nothing yet
-    verify: read io.max from the run's cgroup
+    claim: The guest cannot drive unbounded host disk I/O.
+    enforced_by: the guest has no block device, so there is no guest disk I/O to
+                 cap. Every host write it can induce is bounded elsewhere --
+                 console output by RES-007 and the wall clock, exported artifacts
+                 by RES-006, and swap by MemorySwapMax=0
+    verify: guest enumerates no block device; console throughput stays within the
+            RES-007 envelope; exported bytes stay within the RES-006 caps
+    status: enforced
+    note: This previously read "Guest disk I/O bandwidth is capped" and was filed
+          not-enforced pending an io cgroup delegation. That framing assumed a
+          guest with a disk. This one has none, so the delegation would have
+          throttled exactly one path -- qemu writing console.log at roughly 50 KB
+          per second, already the slowest thing in the system -- and would not
+          have touched artifact writes at all, because the receiver runs outside
+          the run's cgroup scope. That placement is deliberate and should stay. A
+          receiver inside the guest's resource envelope could be starved by the
+          guest whose export caps it exists to enforce.
+
+  - id: RES-008
+    claim: Quarantine growth across runs is bounded by operator retention policy,
+           not by Ironveil.
+    enforced_by: nothing -- RES-006 caps a single run at 256 MB and nothing caps
+                 the number of runs
+    verify: not verified by Ironveil. The operator decides how long run
+            directories live
     status: not-enforced
-    note: The io controller is not delegated to the user slice on this host, so
-          IOReadBandwidthMax cannot be set from an unprivileged scope. Closing
-          this requires either a system-slice scope or a delegated io controller.
+    note: Surfaced while re-examining RES-004. Per-run bounds were all in place
+          and the cross-run total had simply never been stated, which is the kind
+          of gap that only becomes visible when a claim is rewritten. Related to
+          QUAR-001, which covers what must not read those directories rather than
+          how long they persist.
 
   - id: RES-005
     claim: A run cannot exceed its wall-clock budget.
