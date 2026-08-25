@@ -87,7 +87,7 @@ charged against a single global budget so a bomb cannot buy room by nesting.
 
 ## What is and is not enforced
 
-Verified by `tests/run-checks` (36 checks): no network interface, no USB, no
+Verified by `tests/run-checks` (38 checks): no network interface, no USB, no
 graphics, no shared folders, no block device, one sanctioned virtio port, no
 host entropy source, guest-side readback yields nothing, export caps enforced
 mid-stream, wall-clock destruction of a non-cooperative guest, base image

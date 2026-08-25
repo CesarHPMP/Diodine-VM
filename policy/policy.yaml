@@ -158,6 +158,27 @@ policy:
             the partial file is removed
     status: enforced
 
+  - id: RES-007
+    claim: Guest console output goes straight to a host file, outside the export
+           caps, and is bounded only indirectly.
+    enforced_by: RES-005's wall clock, plus the throughput ceiling of the
+                 emulated 16550 UART. RES-006 does not apply -- console bytes
+                 never pass through the receiver, so nothing charges them
+                 against a cap
+    verify: a guest writing to /dev/console as fast as it can sustains roughly
+            50 KB per second, so about 9 MB at the default 180 second budget
+    status: partial
+    note: Measured rather than assumed, after being flagged as a possible
+           unbounded host write. 45 KB per second with small writes, 52 KB per
+           second with 64 KB blocks and four concurrent writers -- concurrency
+           does not raise it, because the 16550 is a single serialized device.
+           That is not a disk-exhaustion path at any plausible budget, but it is
+           the one guest-to-host byte path RES-006 does not cover, and a
+           --timeout raised into the hours should account for it. The check
+           exists mainly as a tripwire -- replacing the serial chardev with
+           virtio-console would raise the ceiling by orders of magnitude and
+           this is what would notice.
+
   - id: ING-001
     claim: Decompression of exported archives is bounded by ratio, absolute
            output size, file count, and nesting depth.

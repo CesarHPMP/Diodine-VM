@@ -253,5 +253,29 @@ else
     bad "AUD-002" "artifacts were dropped rather than namespaced"
 fi
 
+# ============================================== console path (uncapped by design)
+head_ "I. Console throughput (RES-007)"
+./bin/ironveil-run --payload tests/payloads/console-flood.sh --timeout 10 \
+    > "$TMP/flood.log" 2>&1
+FL=$(ls -td quarantine/*/ | head -1)
+FLSZ=$(stat -c %s "$FL/console.log" 2>/dev/null || echo 0)
+
+# Lower bound first: a zero here means the flood never ran and the ceiling
+# check below would pass vacuously.
+if [ "$FLSZ" -lt 10000 ]; then
+    bad "RES-007" "console flood produced only ${FLSZ} bytes; test is not live"
+else
+    ok "RES-007" "console flood is exercising the path (${FLSZ} bytes)"
+
+    # ~50 KB/s measured, so a 10s budget lands near 500 KB. 4 MiB is generous
+    # headroom for a slower or faster host while still catching a change of
+    # transport -- virtio-console would blow through this immediately.
+    if [ "$FLSZ" -gt 4194304 ]; then
+        bad "RES-007" "console throughput jumped to ${FLSZ} bytes in 10s; the transport changed"
+    else
+        ok "RES-007" "console throughput within the measured envelope"
+    fi
+fi
+
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
