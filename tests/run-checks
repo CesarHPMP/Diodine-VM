@@ -47,6 +47,24 @@ else
                    "$(v virtio_ports)" "org.ironveil.out,"
     check OUT-001  "guest read from the port yields nothing" \
                    "$(v readback_bytes)" "0"
+
+    # DEV-003: nothing on the bus but the q35 chipset (8086:*) and the one
+    # virtio device the command line declares. A passed-through device shows a
+    # third vendor id; an accidentally reintroduced virtio-blk shows as
+    # 1AF4:1001 and would take FS-003 down with it.
+    check DEV-003  "only the declared virtio device on the PCI bus" \
+                   "$(v pci | tr ',' '\n' | grep '^1AF4:' | tr '\n' ',')" "1AF4:1003,"
+    check DEV-003  "no PCI vendor outside the chipset and virtio" \
+                   "$(v pci | tr ',' '\n' | grep -vE '^(8086|1AF4):|^$' | tr '\n' ',')" ""
+    # Lower bound, because both checks above are satisfied by an empty string:
+    # a probe that enumerated nothing must not read as a clean bus.
+    if [ "$(v pci_count)" -ge 4 ] 2>/dev/null; then
+        ok  "DEV-003" "PCI enumeration is live ($(v pci_count) devices)"
+    else
+        bad "DEV-003" "PCI enumeration returned '$(v pci_count)'; the two checks above are vacuous"
+    fi
+
+    check RES-004  "guest enumerates no block device"   "$(v block)"  ""
 fi
 
 # ================================================================ export caps
@@ -219,6 +237,26 @@ else
     else
         ok "TCB-001" "VMM ran unprivileged (uid $(j uid))"
     fi
+
+    # RES-001/2/3: the caps themselves, read back from the run's cgroup by the
+    # recorder rather than echoed from the launcher's intent. policy.yaml has
+    # claimed all three enforced since Phase 1, naming exactly this evidence,
+    # and nothing read it until AUD-003 went looking.
+    MB=$(j mem_mb); PCT=$(j cpu_quota_pct)
+    check RES-001 "guest memory capped at the declared figure" \
+                  "$(j memory_max)" "$(( ${MB:-0} * 1024 * 1024 ))"
+    check RES-001 "guest memory cannot reach host swap" "$(j memory_swap_max)" "0"
+    check RES-002 "guest CPU capped at the declared quota" \
+                  "$(j cpu_max)" "$(( ${PCT:-0} * 1000 )) 100000"
+    # pids.max has no declared counterpart to compare against, so assert the
+    # property instead: a finite number, which "max" -- the uncapped value -- is
+    # not. An absent field is a failure too, not a pass by omission.
+    PM=$(j pids_max)
+    if [ -z "$PM" ] || [ "$PM" = "max" ]; then
+        bad "RES-003" "guest process count uncapped (pids.max=${PM:-absent})"
+    else
+        ok  "RES-003" "guest process count capped (pids.max=$PM)"
+    fi
 fi
 
 # ==================================================== host-record integrity
@@ -368,6 +406,83 @@ elif grep -q "quarantine total:" "$TMP/quiet.log"; then
     ok "RES-008" "reports the total quietly when under threshold"
 else
     bad "RES-008" "no cumulative total reported at all"
+fi
+
+# ============================================== policy coverage (AUD-003)
+head_ "L. Policy coverage (AUD-003)"
+# policy.yaml's header says a test naming no statement is testing an assumption.
+# The converse was checked by nothing: a statement no test names is a claim
+# nobody verifies, and it passes 45/45 in silence. Both directions, here.
+
+SELF="$HERE/run-checks"
+
+# Ids as each file actually uses them. In policy.yaml, a statement header. In
+# this harness, the first argument to ok/bad/check -- a mention in a comment is
+# not coverage.
+policy_ids()  { sed -n 's/^  - id: \([A-Z][A-Z0-9]*-[0-9]\{3\}\)[[:space:]]*$/\1/p' "$1" | sort -u; }
+harness_ids() { grep -oE '\b(ok|bad|check)[[:space:]]+"?[A-Z][A-Z0-9]*-[0-9]{3}' "$1" \
+                  | grep -oE '[A-Z][A-Z0-9]*-[0-9]{3}' | sort -u; }
+
+# Statements this harness cannot verify, each with the reason and the place the
+# evidence lives instead. Adding an id here has to be a claim about where it is
+# checked, not a way to stop it being counted:
+#   NET-002   nothing to observe from inside; holds transitively on NET-001,
+#             which is checked -- no interface exists to route from
+#   OUT-002   measured by a separate instrument, tests/out002/, not by this
+#   PLAT-001  inherited from the platform and explicitly not verified here
+EXEMPT_RE='^(NET-002|OUT-002|PLAT-001)$'
+
+coverage_gap() {  # POLICY HARNESS -- statements that no check names
+    comm -23 <(policy_ids "$1") <(harness_ids "$2") | grep -vE "$EXEMPT_RE" || true
+}
+orphan_ids() {    # POLICY HARNESS -- checks that name no statement
+    comm -13 <(policy_ids "$1") <(harness_ids "$2")
+}
+
+# Lower bound first. If either parser drifts from the format it reads, every
+# comparison below succeeds against an empty set.
+NIDS=$(policy_ids policy/policy.yaml | wc -l)
+NCHK=$(harness_ids "$SELF" | wc -l)
+if [ "$NIDS" -lt 20 ] || [ "$NCHK" -lt 20 ]; then
+    bad "AUD-003" "parsed $NIDS statements and $NCHK check ids; the checks below are vacuous"
+else
+    ok  "AUD-003" "policy parses to $NIDS statements, harness to $NCHK check ids"
+fi
+
+GAP=$(coverage_gap policy/policy.yaml "$SELF")
+if [ -n "$GAP" ]; then
+    bad "AUD-003" "claimed but never checked: $(echo $GAP | tr '\n' ' ')"
+else
+    ok  "AUD-003" "every statement is checked here or exempted with its reason"
+fi
+
+ORPHAN=$(orphan_ids policy/policy.yaml "$SELF")
+if [ -n "$ORPHAN" ]; then
+    bad "AUD-003" "checks naming no statement: $(echo $ORPHAN | tr '\n' ' ')"
+else
+    ok  "AUD-003" "every check names a statement that exists"
+fi
+
+# Drive both directions. Two greps nobody has watched say no are not evidence,
+# and this pair is the kind that fails open: a broken regex reports a clean
+# policy. The fabricated ids are assembled through variables so that writing
+# this test does not put the literals into the harness it reads.
+FAKE_STMT=ZZZ-999; FAKE_CHK=YYY-998
+FP="$TMP/policy-extra.yaml"; cp policy/policy.yaml "$FP"
+printf '\n  - id: %s\n    claim: fabricated; drives the coverage check\n    status: enforced\n' \
+       "$FAKE_STMT" >> "$FP"
+if coverage_gap "$FP" "$SELF" | grep -qx "$FAKE_STMT"; then
+    ok  "AUD-003" "an unchecked statement is reported (driven)"
+else
+    bad "AUD-003" "a statement with no check went unreported"
+fi
+
+FH="$TMP/harness-orphan"
+printf '%s "%s" "fabricated" a a\n' check "$FAKE_CHK" > "$FH"
+if orphan_ids policy/policy.yaml "$FH" | grep -qx "$FAKE_CHK"; then
+    ok  "AUD-003" "a check naming no statement is reported (driven)"
+else
+    bad "AUD-003" "an orphan check id went unreported"
 fi
 
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$PASS" "$FAIL"

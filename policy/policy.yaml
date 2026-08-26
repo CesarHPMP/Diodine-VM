@@ -353,6 +353,27 @@ policy:
           and fails silently the day one is added. RUN.json.writing is in the
           test for exactly that reason.
 
+  - id: AUD-003
+    claim: Every statement in this file is either verified by a check in
+           tests/run-checks that names it, or listed there as an exemption with
+           the reason and the place its evidence lives instead -- and every
+           check names a statement that exists here.
+    enforced_by: tests/run-checks section L reads this file and compares its
+                 statement ids against the ids the harness passes to ok/bad/check
+    verify: the comparison is driven against a fabricated statement and a
+            fabricated check label, and must report each one
+    status: enforced
+    note: The header rule above -- add the statement before the test -- was
+          honoured by convention and checked by nothing; the harness never read
+          this file. The unchecked direction is the dangerous one. A statement
+          can lose its check, or never have had one, and every run still reports
+          every check passing, which is the reassuring-failure shape Phase 1
+          kept finding in its instruments. It had already happened here: RES-001,
+          RES-002, RES-003 and DEV-003 each carried status enforced and a
+          concrete verify recipe that nothing executed. The evidence they name
+          was being collected the whole time -- the cgroup limits in RUN.json,
+          the PCI enumeration in probe.txt -- and simply never read.
+
   - id: VMM-001
     claim: The VMM process runs unprivileged and under a seccomp sandbox.
     enforced_by: no sudo anywhere in the launcher; qemu -sandbox on with

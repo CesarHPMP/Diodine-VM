@@ -93,16 +93,19 @@ charged against a single global budget so a bomb cannot buy room by nesting.
 
 ## What is and is not enforced
 
-Verified by `tests/run-checks` (45 checks): no network interface, no USB, no
+Verified by `tests/run-checks` (58 checks): no network interface, no USB, no
 graphics, no shared folders, no block device, one sanctioned virtio port, no
-host entropy source, guest-side readback yields nothing, export caps enforced
-mid-stream, wall-clock destruction of a non-cooperative guest, base image
-byte-identical after a run, ingest refusal of zip bombs, path traversal and
-symlink members, every run recording its own measured confinement state, host
-records surviving a guest that emits artifacts named after them, a run refusing
-to start at all when the confinement profile is missing, and the retention and
-consumer warnings both firing when they should and staying quiet when they
-should not.
+host entropy source, nothing on the PCI bus but the chipset and the one virtio
+device, guest-side readback yields nothing, the memory, swap, CPU and task caps
+read back from the run's own cgroup, export caps enforced mid-stream, wall-clock
+destruction of a non-cooperative guest, base image byte-identical after a run,
+ingest refusal of zip bombs, path traversal and symlink members, every run
+recording its own measured confinement state, host records surviving a guest
+that emits artifacts named after them, a run refusing to start at all when the
+confinement profile is missing, the retention and consumer warnings both firing
+when they should and staying quiet when they should not, and — since the harness
+now reads `policy.yaml` — that every statement in it is checked here or exempted
+with its reason (`AUD-003`).
 
 Known gaps, all recorded in `policy/policy.yaml`:
 

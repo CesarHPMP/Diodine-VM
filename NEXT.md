@@ -6,11 +6,11 @@ and what has to be true before live samples are allowed anywhere near it.
 
 ## Where Phase 1 ended
 
-30 policy statements, 45 checks, all passing. By status:
+31 policy statements, 58 checks. By status:
 
 | status | count | which |
 | --- | --- | --- |
-| `enforced` | 25 | the isolation surface, resource caps, ingest bounds, audit records |
+| `enforced` | 26 | the isolation surface, resource caps, ingest bounds, audit records |
 | `measured` | 1 | `OUT-002` |
 | `partial` | 2 | `RES-007`, `QUAR-001` |
 | `not-enforced` | 1 | `RES-008` |
