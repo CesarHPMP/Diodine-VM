@@ -604,6 +604,17 @@ VSTUB="$TMP/vmmstub"; mkdir -p "$VSTUB"
 MARKER="diagnostic-marker-$$"
 printf '#!/bin/sh\necho "%s" >&2\nexit 0\n' "$MARKER" > "$VSTUB/qemu-system-x86_64"
 chmod +x "$VSTUB/qemu-system-x86_64"
+# --allow-unconfined PERMITS an unconfined run; it does not force one. With the
+# profile actually loaded the launcher still confines, and the profile then --
+# correctly -- refuses to execute a stub binary out of the test's temp directory,
+# so the stub never runs and this check measures nothing. The aa-exec stub from
+# section J is what forces the unconfined path, and the two stubs are needed
+# together.
+#
+# The first version of this check omitted the aa-exec stub. It passed only
+# because the profile happened to be unloaded at the time, which is the same
+# accident that let eight consecutive runs go unconfined in Phase 1.
+printf '#!/bin/sh\nexit 1\n' > "$VSTUB/aa-exec"; chmod +x "$VSTUB/aa-exec"
 PATH="$VSTUB:$PATH" ./bin/diodine-run --allow-unconfined --timeout 20 \
     > "$TMP/vmmstub.log" 2>&1
 VDIR=$(ls -td quarantine/*/ 2>/dev/null | head -1)
