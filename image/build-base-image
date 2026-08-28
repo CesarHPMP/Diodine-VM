@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 César Henrique Policarpo de Melo
 # Build the Diodine disposable guest base image.
 #
 # Produces two immutable artifacts in image/base/:

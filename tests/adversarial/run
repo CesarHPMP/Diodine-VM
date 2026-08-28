@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 César Henrique Policarpo de Melo
 # Diodine VM Phase 2 adversarial suite.
 #
 # tests/run-checks says of itself that it is NOT this: its payloads are

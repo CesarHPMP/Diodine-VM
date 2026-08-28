@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 César Henrique Policarpo de Melo
 # diodine-run -- launch one disposable analysis VM.
 #
 # The QEMU command line built here IS the security policy. Every device the

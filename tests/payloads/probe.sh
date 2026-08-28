@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 César Henrique Policarpo de Melo
 # Enumerate the guest's entire visible attack surface, and try to read back
 # through the output channel. Everything is reported as key=value so the host
 # harness can assert on it without parsing prose.

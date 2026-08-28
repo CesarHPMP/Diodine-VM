@@ -148,19 +148,20 @@ warns if `--timeout` goes past an hour, where that figure stops being small.
 
 ```
 diodine.md              design document and threat model
-NEXT.md                  Phase 2 plan: workstreams, test rules, live-sample gate
-BACKLOG.md               deferred BY DESIGN, with what would close each item
-policy/policy.yaml       every claim, its enforcement point, its status
-policy/apparmor/         VMM confinement profile and installer
+LICENSE                 GNU GPL v3 (verbatim); see Licence below
+NEXT.md                 Phase 2 plan: workstreams, test rules, live-sample gate
+BACKLOG.md              deferred BY DESIGN, with what would close each item
+policy/policy.yaml      every claim, its enforcement point, its status
+policy/apparmor/        VMM confinement profile and installer
 bin/diodine-run         hardened launcher; the QEMU args ARE the policy
 bin/diodine-receiver    host-side output receiver; parses nothing
 bin/diodine-ingest      bounded decompression; the only thing that parses
-guest/init               guest PID 1
+guest/init              guest PID 1
 guest/diodine-send      guest-side artifact emitter
-image/build-base-image   builds the RAM-only Alpine base
-tests/run-checks         verification harness, keyed to policy IDs
-tests/adversarial/       Phase 2 hostile-input suite (frames, ingest)
-quarantine/              untrusted output (gitignored)
+image/build-base-image  builds the RAM-only Alpine base
+tests/run-checks        verification harness, keyed to policy IDs
+tests/adversarial/      Phase 2 hostile-input suite (frames, ingest)
+quarantine/             untrusted output (gitignored)
 ```
 
 `bin/diodine-run --help` lists every knob. Reading the `ARGS` array in that
@@ -177,3 +178,30 @@ responsibility for what leaves the machine.
 
 Nothing arriving in `quarantine/` is trustworthy. That is the point of the
 directory, not a caveat about it.
+
+## Licence
+
+Diodine VM is free software under the **GNU General Public License, version 3 or
+later**. `LICENSE` is the verbatim GPL-3.0 text; every source file carries an
+SPDX identifier rather than a repeated copy of the notice.
+
+    Copyright (C) 2026 César Henrique Policarpo de Melo
+
+    This program is free software: you can redistribute it and/or modify it
+    under the terms of the GNU General Public License as published by the Free
+    Software Foundation, either version 3 of the License, or (at your option)
+    any later version.
+
+    This program is distributed in the hope that it will be useful, but WITHOUT
+    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+    FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
+    more details.
+
+The warranty disclaimer above is the licence's, and it is legal boilerplate. It
+is **not** the safety statement — that is *Scope*, above, and it is the one that
+actually matters here. A licence says nothing about whether a boundary holds.
+
+The Alpine minirootfs and kernel are **downloaded at build time** by
+`image/build-base-image`, not redistributed in this repository, so their own
+licences apply to what lands in `image/base/` rather than to this source tree.
+An image built here and then shipped elsewhere would carry them.

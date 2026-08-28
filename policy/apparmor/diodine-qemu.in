@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 César Henrique Policarpo de Melo
 # Diodine VMM confinement (VMM-002).
 #
 # A named profile -- it is NOT attached to the qemu binary path, so it applies

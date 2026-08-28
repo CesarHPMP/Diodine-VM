@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 César Henrique Policarpo de Melo
 """Adversarial ingest corpus (ING-001, ING-002, ING-003).
 
 diodine-ingest is the stage that finally PARSES guest output and is therefore

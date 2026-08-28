@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 César Henrique Policarpo de Melo
 /* OUT-002 measurement probe -- guest side.
  *
  * The reverse channel exists because the host's drain rate is observable from

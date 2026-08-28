@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 César Henrique Policarpo de Melo
 # Diodine Phase 1 verification.
 #
 # Every check names the policy statement it verifies. This is deliberately NOT
