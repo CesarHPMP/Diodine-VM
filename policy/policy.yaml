@@ -297,6 +297,45 @@ policy:
     verify: an archive containing ../../etc/passwd and a symlink member is refused
     status: enforced
 
+  - id: ING-003
+    claim: Every expanded file can be attributed to the archive it came from, and
+           guest-chosen member names share no namespace with the directories
+           ingest expands into.
+    enforced_by: ironveil-ingest names a nested archive's expansion by the
+                 archive's path RELATIVE to its level rather than by basename,
+                 and places it in a sibling `.nested` tree rather than in the
+                 level itself, so member names and expansion directories cannot
+                 collide; a collision that does occur aborts the ingest
+                 (makedirs exist_ok=False) instead of merging
+    verify: tests/adversarial/ingest -- two archives sharing a basename in
+            different directories expand to separate directories; an archive
+            shipping a member named to squat on the directory a sibling archive
+            will expand into does not commingle with it
+    status: enforced
+    note: |
+      Found by the Phase 2 adversarial corpus, not by an audit of this file.
+      maybe_recurse() derived the nested output directory from
+      os.path.basename(path) alone and then called makedirs(exist_ok=True), so
+      a/m.zip and b/m.zip expanded into ONE directory and commingled, at exit 0,
+      with the log printing "nested zip at depth 1: m.zip" twice.
+
+      Never an escape -- safe_member_path still confined every member under the
+      destination, so ING-002 held throughout. The damage was to attribution:
+      the output could not say which archive a file came from, which is the
+      property an analyst is actually relying on. It also gave a
+      denial-of-analysis, since planting a colliding member name makes O_EXCL
+      refuse a benign archive.
+
+      Preserving the relative path is NOT sufficient on its own, and that is why
+      the `.nested` tree exists. Expanding in place beside the archive still
+      shares a namespace with the guest: a member named a/m.zip.d1/decoy.txt
+      lands in exactly the directory a/m.zip is about to expand into. Separating
+      the two namespaces is the same structural argument AUD-002 settled for the
+      run directory -- guest names in artifacts/, host records outside it --
+      applied one stage later. Reserving or sanitising names was rejected there
+      for the reason it would be rejected here: it fails silently the day
+      someone adds a name to the set.
+
   - id: QUAR-001
     claim: Quarantine storage is excluded from automatic consumers (indexers,
            thumbnailers, antivirus, backup).

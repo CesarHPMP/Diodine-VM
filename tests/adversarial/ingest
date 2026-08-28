@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Adversarial ingest corpus (ING-001, ING-002, AUD-002).
+"""Adversarial ingest corpus (ING-001, ING-002, ING-003).
 
 ironveil-ingest is the stage that finally PARSES guest output and is therefore
 the most dangerous program in the project. It is a resource-safety and
@@ -78,18 +78,59 @@ def run_case(c):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def check_commingled(dest, err):
-    """The basename-collision finding, pinned as current behaviour."""
+def find_all(dest, prefix):
     hits = []
     for root, _, files in os.walk(dest):
         for f in files:
-            if f.startswith("from_"):
+            if f.startswith(prefix):
                 hits.append(os.path.join(root, f))
-    dirs = {os.path.dirname(h) for h in hits}
+    return hits
+
+
+def check_separated(dest, err):
+    """ING-003: two archives sharing a basename must not expand into one place."""
+    hits = find_all(dest, "from_")
     if len(hits) != 2:
         return False, f"expected both inner members, found {len(hits)}"
-    if len(dirs) != 1:
-        return False, "archives were separated -- behaviour changed, update the finding"
+    if len({os.path.dirname(h) for h in hits}) != 2:
+        return False, "the two archives commingled into one directory"
+    # Attribution is the actual claim: each expansion has to carry the path of
+    # the archive it came from, not just be in some distinct directory.
+    for h in hits:
+        want = "a" if h.endswith("from_a.txt") else "b"
+        if f"{os.sep}{want}{os.sep}" not in h:
+            return False, f"expansion does not name its source archive: {h}"
+    # And the log must distinguish them -- it is the attribution record a person
+    # actually reads. Two identical "nested zip at depth 1: m.zip" lines is how
+    # this went unnoticed.
+    nested = [l for l in err.splitlines() if "nested zip at depth 1" in l]
+    if len(nested) != 2:
+        return False, f"expected two nested-archive log lines, got {len(nested)}"
+    if len(set(nested)) != 2:
+        return False, "both nested archives logged identically; the log cannot attribute"
+    return True, ""
+
+
+def check_no_squat(dest, err):
+    """ING-003: no member name can land in the directory an archive expands into.
+
+    Two decoys, because there are two plausible namings and a check that only
+    knew one would be vacuous against the other. decoy_root squats where a
+    BASENAME-derived expansion goes (m.zip.d1, the pre-fix behaviour); decoy_rel
+    squats where a RELATIVE-PATH-derived one goes if it expands in place
+    (a/m.zip.d1). Only putting expansions in a separate `.nested` tree defeats
+    both, which is why ING-003 does that rather than just preserving the path.
+    """
+    inner = find_all(dest, "from_inner")
+    decoys = find_all(dest, "decoy")
+    if len(inner) != 1:
+        return False, f"expected one expanded inner member, found {len(inner)}"
+    if len(decoys) != 2:
+        return False, f"expected both planted members, found {len(decoys)}"
+    home = os.path.dirname(inner[0])
+    for d in decoys:
+        if os.path.dirname(d) == home:
+            return False, f"a planted member commingled with the expansion: {d}"
     return True, ""
 
 
@@ -163,23 +204,31 @@ def build():
            zbytes({"a.txt": b"x" * 10000}, compress=zipfile.ZIP_STORED)[:500],
            RC_REFUSED, "malformed archive"))
 
-    # ------------------------------------------------------------- pinned ----
-    A(Case("pinned/basename-collision", "AUD-002",
+    # ------------------------------------------------------- ING-003 namespace --
+    # Both of these FAILED before the fix, which is the only reason to trust
+    # them passing now. The first commingled two archives into one directory at
+    # exit 0; the second let a guest-chosen member name land inside the
+    # directory a sibling archive was about to expand into.
+    A(Case("namespace/basename-collision", "ING-003",
            zbytes({"a/m.zip": zbytes({"from_a.txt": b"FROM a/m.zip\n"}),
                    "b/m.zip": zbytes({"from_b.txt": b"FROM b/m.zip\n"})},
                   compress=zipfile.ZIP_STORED),
-           RC_OK, check=check_commingled,
-           note="maybe_recurse() derives the nested output directory from "
-                "basename ALONE -- os.path.basename(path) + '.dN' -- then calls "
-                "makedirs(..., exist_ok=True). Two archives sharing a basename in "
-                "different directories of the same parent expand into ONE "
-                "directory and commingle, exit 0, with the log printing the same "
-                "'nested zip at depth 1: m.zip' line twice. Not an escape: "
-                "safe_member_path still confines every member under dest. It is an "
-                "ATTRIBUTION failure -- output cannot say which archive a file came "
-                "from -- and the same class as AUD-002, a guest-chosen string "
-                "sharing a namespace. It also gives a denial-of-analysis: planting "
-                "a colliding member name makes O_EXCL refuse a benign archive."))
+           RC_OK, check=check_separated))
+
+    A(Case("namespace/squatted-expansion-dir", "ING-003",
+           zbytes({"a/m.zip": zbytes({"from_inner.txt": b"REAL\n"}),
+                   "m.zip.d1/decoy_root.txt": b"PLANTED BY THE GUEST\n",
+                   "a/m.zip.d1/decoy_rel.txt": b"PLANTED BY THE GUEST\n"},
+                  compress=zipfile.ZIP_STORED),
+           RC_OK, check=check_no_squat))
+
+    # ------------------------------------------------------------- pinned ----
+    # Current behaviour, asserted so a change is caught. No decision taken.
+    A(Case("pinned/zero-length-member", "ING-001",
+           zbytes({"empty.bin": b""}), RC_OK,
+           note="a 0-byte member is accepted and charged one file against "
+                "--max-files but no bytes. Undecided whether an archive of "
+                "nothing but empty members should be refused."))
     return C
 
 

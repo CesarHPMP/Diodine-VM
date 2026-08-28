@@ -503,11 +503,29 @@ harness_ids() { grep -oE '\b(ok|bad|check)[[:space:]]+"?[A-Z][A-Z0-9]*-[0-9]{3}'
 #   PLAT-001  inherited from the platform and explicitly not verified here
 EXEMPT_RE='^(NET-002|OUT-002|PLAT-001)$'
 
+# The adversarial suite verifies statements this harness does not -- ING-003 is
+# the first -- and every case there names the statement it attacks. Coverage has
+# to be computed against BOTH, or a statement checked over there reads as a gap
+# here, and the obvious way to quiet it would be to exempt the statement: an
+# entry in EXEMPT_RE claiming it is checked elsewhere, sitting next to the real
+# checks that check it. Exemptions should shrink as coverage grows, not grow
+# with it.
+#
+# Extracted by a different rule from harness_ids because the shape is different:
+# a case carries its statement as a bare string field, not as an argument to
+# ok/bad. The matched set is printed rather than just counted -- an over-broad
+# regex here would make coverage look complete, which is the one direction this
+# check cannot fail safely in, and a human reading the list will see it.
+ADV_FILES="tests/adversarial/frames tests/adversarial/ingest"
+adversarial_ids() { grep -ohE '"[A-Z][A-Z0-9]*-[0-9]{3}"' $ADV_FILES 2>/dev/null \
+                      | tr -d '"' | sort -u; }
+covered_ids() { cat <(harness_ids "$1") <(adversarial_ids) | sort -u; }
+
 coverage_gap() {  # POLICY HARNESS -- statements that no check names
-    comm -23 <(policy_ids "$1") <(harness_ids "$2") | grep -vE "$EXEMPT_RE" || true
+    comm -23 <(policy_ids "$1") <(covered_ids "$2") | grep -vE "$EXEMPT_RE" || true
 }
 orphan_ids() {    # POLICY HARNESS -- checks that name no statement
-    comm -13 <(policy_ids "$1") <(harness_ids "$2")
+    comm -13 <(policy_ids "$1") <(covered_ids "$2")
 }
 
 # Lower bound first. If either parser drifts from the format it reads, every
@@ -518,6 +536,13 @@ if [ "$NIDS" -lt 20 ] || [ "$NCHK" -lt 20 ]; then
     bad "AUD-003" "parsed $NIDS statements and $NCHK check ids; the checks below are vacuous"
 else
     ok  "AUD-003" "policy parses to $NIDS statements, harness to $NCHK check ids"
+fi
+
+NADV=$(adversarial_ids | wc -l)
+if [ "$NADV" -lt 3 ]; then
+    bad "AUD-003" "parsed $NADV ids from the adversarial suite; its coverage reads as absent"
+else
+    ok  "AUD-003" "adversarial suite covers: $(adversarial_ids | tr '\n' ' ')"
 fi
 
 GAP=$(coverage_gap policy/policy.yaml "$SELF")

@@ -213,14 +213,39 @@ def expand_gz(path, dest, budget, depth, args):
     return produced
 
 
+def nested_dir(path, dest, depth):
+    """Where a nested archive's expansion goes (ING-003).
+
+    Two properties, and the second is the one that was missing:
+
+      * The expansion is named by the archive's path RELATIVE TO its level, not
+        by its basename. Basename alone put a/m.zip and b/m.zip in one directory.
+      * It lands in a `.nested` tree beside the level rather than inside it, so
+        it shares no namespace with any guest-chosen member name.
+
+    The second is not belt-and-braces. Keeping the relative path but expanding
+    in place still shares a namespace: a guest that ships a/m.zip alongside a
+    member named a/m.zip.d1/decoy.txt gets its decoy into the directory m.zip is
+    about to expand into. Only the guest's own names live under a `.dN`
+    directory; only ingest's live under a `.nested` one, and every interior
+    directory of a `.nested` tree is created by ingest mirroring a path, never
+    by unpacking a member. That is the same structural argument AUD-002 settled
+    for the run directory, applied one stage later.
+    """
+    rel = os.path.relpath(path, dest)
+    return os.path.join(dest + ".nested", rel + f".d{depth + 1}")
+
+
 def maybe_recurse(path, dest, budget, depth, args):
     if depth >= args.max_depth:
         return
     kind = sniff(path)
     if kind is None:
         return
-    sub = os.path.join(dest, os.path.basename(path) + f".d{depth + 1}")
-    log(f"nested {kind} at depth {depth + 1}: {os.path.basename(path)}")
+    sub = nested_dir(path, dest, depth)
+    # The relative path, not the basename: the log is the attribution record,
+    # and two archives called m.zip logged identically is how this was missed.
+    log(f"nested {kind} at depth {depth + 1}: {os.path.relpath(path, dest)}")
     expand(path, sub, budget, depth + 1, args)
 
 
@@ -228,7 +253,12 @@ def expand(path, dest, budget, depth, args):
     kind = sniff(path)
     if kind is None:
         return 0
-    os.makedirs(dest, mode=0o700, exist_ok=True)
+    # exist_ok=False deliberately. This used to merge, which is what let two
+    # archives commingle silently at exit 0. Under ING-003 nothing should ever
+    # collide here, so a collision is a defect and must abort the ingest rather
+    # than produce output nobody can attribute. FileExistsError is an OSError
+    # and main() already refuses on it.
+    os.makedirs(dest, mode=0o700, exist_ok=False)
     if kind == "zip":
         return expand_zip(path, dest, budget, depth, args)
     if kind == "tar":
