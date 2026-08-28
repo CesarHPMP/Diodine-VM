@@ -218,7 +218,8 @@ else
     # makes the recorder write nothing and this check fail -- which is how
     # QUAR-001's field was caught. Keep this list in step with the record.
     ( RUN_ID=AUD-001-fallback MEM_MB=1 CPUS=1 CPU_QUOTA=1 TIMEOUT=1 ALLOW_RNG=0 \
-      ALLOW_UNCONFINED=0 QUAR_CONSUMERS=""
+      ALLOW_UNCONFINED=0 QUAR_CONSUMERS="" \
+      HOST_KERNEL=k HOST_QEMU=q HOST_AA=a
       . "$FB.fn"
       record_launch_state "$FB.json" ) 2>/dev/null
     if [ ! -r "$FB.json" ]; then

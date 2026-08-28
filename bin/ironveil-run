@@ -221,6 +221,18 @@ cat "$BASE/initramfs" "$RUNDIR/overlay.cpio.gz" > "$RUNDIR/initrd"
 
 BASE_SHA_BEFORE=$(sha256sum "$BASE/initramfs" | cut -d' ' -f1)
 
+# W5 is deferred (see BACKLOG.md), but the provenance it depends on is not: every
+# number this project has measured -- RES-007's ceiling, OUT-002's buffer depth,
+# the profile's completeness -- is a property of one kernel and one QEMU. Without
+# recording which, a number collected today cannot be attributed to a platform
+# later, and the deferral stops being honest.
+HOST_KERNEL=$(uname -r 2>/dev/null || echo unknown)
+HOST_QEMU=$(qemu-system-x86_64 --version 2>/dev/null \
+            | sed -n '1s/^QEMU emulator version //p')
+HOST_AA=$(apparmor_parser --version 2>/dev/null | sed -n '1s/.*version //p')
+[ -n "$HOST_QEMU" ] || HOST_QEMU=unknown
+[ -n "$HOST_AA" ]   || HOST_AA=unknown
+
 # ------------------------------------------------------------------ receiver --
 say "starting receiver (quarantine: quarantine/$RUN_ID)"
 "$HERE/ironveil-receiver" \
@@ -394,6 +406,11 @@ record_launch_state() {
         printf '    "cpu_max": "%s",\n' "$cg_cpu"
         printf '    "pids_max": "%s",\n' "$cg_pids"
         printf '    "io_max": "%s"\n' "$cg_io"
+        printf '  },\n'
+        printf '  "host": {\n'
+        printf '    "kernel": "%s",\n' "$HOST_KERNEL"
+        printf '    "qemu": "%s",\n' "$HOST_QEMU"
+        printf '    "apparmor_parser": "%s"\n' "$HOST_AA"
         printf '  },\n'
         printf '  "declared": {\n'
         printf '    "mem_mb": %s,\n' "$MEM_MB"
