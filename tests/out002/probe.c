@@ -5,7 +5,7 @@
  * stops draining the virtqueue, and the guest's write() blocks. Blocking is
  * timing, and timing is information. This measures how much.
  *
- * Method: emit one large IVF1 frame as a carrier -- the bytes are meaningless,
+ * Method: emit one large DVF1 frame as a carrier -- the bytes are meaningless,
  * the point is to keep writing -- and record how long each chunk's write() took.
  * Then emit the latency series as a second frame. The host correlates that
  * series against the signal schedule it transmitted.
@@ -34,7 +34,7 @@
 #include <fcntl.h>
 #include <time.h>
 
-#define PORT    "/dev/virtio-ports/org.ironveil.out"
+#define PORT    "/dev/virtio-ports/org.diodine.out"
 #define CHUNK   4096
 /* Unpaced, the channel absorbs ~350 MB/s, so any carrier small enough to fit
  * under RES-006 drains in well under a second -- 32 MiB went in 0.09s. To hold
@@ -73,12 +73,12 @@ static int write_all(int fd, const void *p, size_t n)
     return 0;
 }
 
-/* IVF1 | uint16 name_len | uint64 size | name -- big endian, no padding. */
+/* DVF1 | uint16 name_len | uint64 size | name -- big endian, no padding. */
 static int emit_header(int fd, const char *name, uint64_t size)
 {
     uint8_t h[14];
     uint16_t nl = (uint16_t)strlen(name);
-    memcpy(h, "IVF1", 4);
+    memcpy(h, "DVF1", 4);
     h[4] = (uint8_t)(nl >> 8);
     h[5] = (uint8_t)nl;
     for (int i = 0; i < 8; i++) h[6 + i] = (uint8_t)(size >> (56 - 8 * i));

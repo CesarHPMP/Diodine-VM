@@ -1,10 +1,10 @@
-# Ironveil
+# Diodine VM
 
-> **Ironveil — A capability-restricted malware analysis environment.**
+> **Diodine VM — A capability-restricted malware analysis environment.**
 
 ## Concept
 
-Ironveil is a research/prototyping project for a hardened malware-analysis environment built around **capability restriction, compartmentalization, and narrowly defined data boundaries**.
+Diodine is a research/prototyping project for a hardened malware-analysis environment built around **capability restriction, compartmentalization, and narrowly defined data boundaries**.
 
 The central idea is not to assume that the analysis VM will remain trustworthy. Instead, the surrounding system should be designed so that even a fully compromised guest has very limited capabilities and cannot cause effects outside its explicitly authorized resource envelope.
 
@@ -28,7 +28,7 @@ This architecture is, structurally, a re-derivation of **Qubes OS**. Qubes alrea
 - no shared folders, no implicit clipboard, per-domain device assignment
 - a dom0 that never touches untrusted data directly
 
-Ironveil should either **adopt Qubes as its base** or explicitly document why it does not. Building the same model from scratch on commodity Linux is a legitimate learning exercise, but it should be a deliberate choice rather than an accident of not having looked.
+Diodine should either **adopt Qubes as its base** or explicitly document why it does not. Building the same model from scratch on commodity Linux is a legitimate learning exercise, but it should be a deliberate choice rather than an accident of not having looked.
 
 Other relevant prior art worth reviewing before Phase 1:
 
@@ -151,11 +151,11 @@ Any software channel with flow control leaks information backward. Backpressure,
 
 This is acceptable under this threat model. It must be **stated as a limitation**, not quietly assumed away, otherwise Phase 2 adversarial testing will "prove" a property that was never actually claimed.
 
-The claim Ironveil makes is:
+The claim Diodine makes is:
 
 > The guest has no *general-purpose* read capability into the outer environment, and no channel of sufficient bandwidth to exfiltrate meaningful host state.
 
-The claim Ironveil does **not** make:
+The claim Diodine does **not** make:
 
 > Zero bits flow from outside to inside.
 
@@ -218,14 +218,14 @@ The security property should therefore be expressed in terms of **capabilities**
 
 ### Microarchitectural Side Channels
 
-Spectre/Meltdown-class and MDS-class attacks are cross-VM information leaks that no amount of device-model minimization prevents. Mitigating them is a **platform** decision, not an Ironveil decision:
+Spectre/Meltdown-class and MDS-class attacks are cross-VM information leaks that no amount of device-model minimization prevents. Mitigating them is a **platform** decision, not an Diodine decision:
 
 - keep microcode and host kernel current
 - enable relevant CPU mitigations rather than disabling them for performance
 - consider disabling SMT/hyperthreading for the analysis host, since several attacks are sibling-thread-dependent
 - do not co-locate the analysis VM with anything sensitive on the same physical machine
 
-Document these as **assumptions inherited from the platform**, outside the boundary Ironveil itself enforces.
+Document these as **assumptions inherited from the platform**, outside the boundary Diodine itself enforces.
 
 ## Capability-Oriented Security Model
 
@@ -354,7 +354,7 @@ This creates a direct tension with the rest of this document:
 
 > Every step taken to *minimize* exposed interfaces makes the VM look *more* obviously like an analysis VM.
 
-Ironveil should resolve this tension explicitly rather than pretending it does not exist. Reasonable position for a research prototype:
+Diodine should resolve this tension explicitly rather than pretending it does not exist. Reasonable position for a research prototype:
 
 - **Containment wins.** Do not weaken isolation to defeat evasion.
 - Treat evasion as an *observation*, not a failure: a sample that goes dormant under a hypervisor has told you something useful.
@@ -394,7 +394,7 @@ The original sketch called for a "Tails-like" outer environment. This conflated 
 - **Amnesia** (Tails) means nothing persists. It is designed for anonymity under coercion, on hardware the user may not control.
 - **Compartmentalization** (Qubes) means different trust domains cannot reach each other. It is designed for containing compromise.
 
-Ironveil needs **compartmentalization**. It does not need amnesia — and amnesia actively fights the requirement, since the entire point of the output channel is to *retain analysis artifacts*.
+Diodine needs **compartmentalization**. It does not need amnesia — and amnesia actively fights the requirement, since the entire point of the output channel is to *retain analysis artifacts*.
 
 Tails is additionally a poor host for this work in practice: it is not built to be a hypervisor host, has no persistent storage by design, and running VMs inside it is discouraged upstream. Using it here would be adopting a property that is not wanted while giving up the tooling that is.
 
@@ -561,9 +561,13 @@ That question should drive the architecture.
 
 ## Naming
 
-Candidates considered: Ironveil, Unidome, Glasshouse, Airlock, Deadbolt, Blackbox, Cordon, Ironbox, Vaultline, Nullgate, Redoubt, Sentinel.
+Candidates originally considered: Ironveil, Unidome, Glasshouse, Airlock, Deadbolt, Blackbox, Cordon, Ironbox, Vaultline, Nullgate, Redoubt, Sentinel.
 
-**Preferred: Ironveil** — a hardened boundary around something dangerous.
+**Originally chosen: Ironveil** — a hardened boundary around something dangerous.
+
+**Renamed to Diodine VM.** A diode passes current one way and refuses it the other, which is closer to what this project actually claims than "veil" was. `OUT-001` is directional by construction: the host opens the outbound FIFO `O_RDONLY`, and nothing here ever opens the inbound one for writing. The name points at the invariant rather than at the armour.
+
+It also keeps the honest caveat in view. A diode is directional, not perfectly one-way, and `OUT-002` says exactly that — the channel leaks timing back to the guest, which is why that statement is `measured` rather than `enforced`, with a bit rate attached. A name that promised one-wayness outright would be overclaiming.
 
 ## Scope and Safety
 
@@ -583,8 +587,8 @@ Links verified 2026-08-24.
 | --- | --- |
 | [Architecture overview](https://www.qubes-os.org/doc/architecture/) | The compartmentalization model in summary form. |
 | [Architecture specification (PDF, v0.3)](https://www.qubes-os.org/attachment/doc/arch-spec-0.3.pdf) | The original design document. Predates the current codebase, but explains the *reasoning* behind each boundary — which is the part worth borrowing. |
-| [Security goals and threat model](https://www.qubes-os.org/security/goals/) | A worked example of stating what a system explicitly does **not** guarantee. Compare against Ironveil's own threat model before Phase 1. |
-| [qrexec](https://www.qubes-os.org/doc/qrexec/) | Policy-mediated inter-VM RPC. This is a hardened, deployed version of Ironveil's narrow output channel; the policy file format is the interesting part. |
+| [Security goals and threat model](https://www.qubes-os.org/security/goals/) | A worked example of stating what a system explicitly does **not** guarantee. Compare against Diodine's own threat model before Phase 1. |
+| [qrexec](https://www.qubes-os.org/doc/qrexec/) | Policy-mediated inter-VM RPC. This is a hardened, deployed version of Diodine's narrow output channel; the policy file format is the interesting part. |
 | [Disposable VMs](https://www.qubes-os.org/doc/disposable/) | Their implementation of the disposable analysis VM and its lifecycle. |
 | [Copying files between qubes](https://www.qubes-os.org/doc/how-to-copy-and-move-files/) | Note that the *receiving* domain initiates the transfer and no filesystem is ever mounted across the boundary — the same conclusion reached in "Do Not Mount Guest-Authored Filesystems" above. |
 | [Device handling security](https://www.qubes-os.org/doc/device-handling-security/) | USB / PCI / storage attack surface; maps onto the Interface Minimization section. |

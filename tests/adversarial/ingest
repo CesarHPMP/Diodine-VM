@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Adversarial ingest corpus (ING-001, ING-002, ING-003).
 
-ironveil-ingest is the stage that finally PARSES guest output and is therefore
+diodine-ingest is the stage that finally PARSES guest output and is therefore
 the most dangerous program in the project. It is a resource-safety and
 path-safety control, not a memory-safety boundary.
 
@@ -20,7 +20,7 @@ import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-INGEST = os.path.join(ROOT, "bin", "ironveil-ingest")
+INGEST = os.path.join(ROOT, "bin", "diodine-ingest")
 
 RC_OK, RC_REFUSED, RC_USAGE = 0, 3, 2
 
@@ -160,11 +160,11 @@ def build():
            "file count exceeded", args=["--max-files", "10"]))
 
     A(Case("path/traversal-zip", "ING-002",
-           zbytes({"../../../../etc/ironveil-pwned": b"escaped\n"}), RC_REFUSED))
+           zbytes({"../../../../etc/diodine-pwned": b"escaped\n"}), RC_REFUSED))
     A(Case("path/absolute-zip", "ING-002",
-           zbytes({"/etc/ironveil-pwned": b"escaped\n"}), RC_REFUSED))
+           zbytes({"/etc/diodine-pwned": b"escaped\n"}), RC_REFUSED))
     A(Case("path/backslash-traversal", "ING-002",
-           zbytes({"..\\..\\ironveil-pwned": b"escaped\n"}), RC_REFUSED))
+           zbytes({"..\\..\\diodine-pwned": b"escaped\n"}), RC_REFUSED))
     A(Case("path/drive-qualified", "ING-002",
            zbytes({"C:evil.txt": b"escaped\n"}), RC_REFUSED))
 

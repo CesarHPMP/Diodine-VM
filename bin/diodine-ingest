@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ironveil quarantine ingest -- bounded, unprivileged artifact expansion.
+"""Diodine quarantine ingest -- bounded, unprivileged artifact expansion.
 
 This is the stage that finally *parses* guest output, and it is therefore the
 most dangerous program in the project. Everything upstream of it was designed

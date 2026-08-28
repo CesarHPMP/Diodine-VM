@@ -1,4 +1,4 @@
-# Ironveil — deferred by design
+# Diodine VM — deferred by design
 
 Everything here is **incomplete on purpose**, not by oversight. Each entry says
 what would close it, and what it currently blocks. `NEXT.md` is the Phase 2 plan;
@@ -61,11 +61,11 @@ Phase 1 measured on-off keying. Still open:
 
 ## W6 — `QUAR-001`, structurally
 
-**Status: open, and partly outside Ironveil's reach. `QUAR-001` is `partial` and says so.**
+**Status: open, and partly outside Diodine's reach. `QUAR-001` is `partial` and says so.**
 
 Detection landed in Phase 1: the launcher names any indexer, thumbnailer, AV or
 backup agent running, and records it per run. Markers are advisory and always will
-be — Ironveil cannot make a third-party agent honour them.
+be — Diodine cannot make a third-party agent honour them.
 
 What would actually change the property is a host decision: a dedicated filesystem
 for `quarantine/` mounted `nodev,nosuid,noexec` with a quota. It currently sits on
@@ -86,7 +86,7 @@ Reporting landed — cumulative size is printed after every run and warns past
 
 If a bound is wanted, the honest options are a filesystem quota or an explicit
 operator-configured retention policy. **Neither should be automatic deletion
-inside `ironveil-run`.** Auto-pruning quarantined output is the kind of
+inside `diodine-run`.** Auto-pruning quarantined output is the kind of
 helpfulness that destroys the evidence someone came back for.
 
 ---

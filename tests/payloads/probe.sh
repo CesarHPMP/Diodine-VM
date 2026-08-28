@@ -3,9 +3,9 @@
 # through the output channel. Everything is reported as key=value so the host
 # harness can assert on it without parsing prose.
 set -u
-OUT=/ironveil/out/probe.txt
+OUT=/diodine/out/probe.txt
 port=$(for d in /sys/class/virtio-ports/*; do
-           [ "$(cat "$d/name" 2>/dev/null)" = "org.ironveil.out" ] && echo "/dev/$(basename "$d")"
+           [ "$(cat "$d/name" 2>/dev/null)" = "org.diodine.out" ] && echo "/dev/$(basename "$d")"
        done)
 
 {

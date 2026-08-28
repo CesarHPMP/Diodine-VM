@@ -1,5 +1,5 @@
 #!/bin/bash
-# Ironveil Phase 1 verification.
+# Diodine Phase 1 verification.
 #
 # Every check names the policy statement it verifies. This is deliberately NOT
 # the Phase 2 adversarial suite -- these payloads are cooperative probes that
@@ -26,7 +26,7 @@ TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 # =============================================================== guest surface
 head_ "A. Guest-visible attack surface"
 rm -rf "$TMP/q"; mkdir -p "$TMP/q"
-./bin/ironveil-run --payload tests/payloads/probe.sh --timeout 90 \
+./bin/diodine-run --payload tests/payloads/probe.sh --timeout 90 \
     > "$TMP/probe.log" 2>&1
 PROBE=$(ls -td quarantine/*/ | head -1)
 P="$PROBE/artifacts/probe.txt"
@@ -44,7 +44,7 @@ else
     check FS-001   "no shared folder mounted"           "$(v mounted_9p)"    ""
     check FS-002   "no block device mounted"            "$(v block_mounts)"  ""
     check DEV-004  "only the one sanctioned virtio port" \
-                   "$(v virtio_ports)" "org.ironveil.out,"
+                   "$(v virtio_ports)" "org.diodine.out,"
     check OUT-001  "guest read from the port yields nothing" \
                    "$(v readback_bytes)" "0"
 
@@ -69,7 +69,7 @@ fi
 
 # ================================================================ export caps
 head_ "B. Export bounds (host-side enforcement)"
-./bin/ironveil-run --payload tests/payloads/oversize.sh \
+./bin/diodine-run --payload tests/payloads/oversize.sh \
     --max-artifact 4096 --timeout 90 > "$TMP/over.log" 2>&1
 OVER=$(ls -td quarantine/*/ | head -1)
 if grep -q "exceeds per-file cap" "$TMP/over.log"; then
@@ -86,7 +86,7 @@ fi
 # ================================================================= wall clock
 head_ "C. Wall-clock containment"
 START=$(date +%s)
-./bin/ironveil-run --payload tests/payloads/spin.sh --timeout 20 \
+./bin/diodine-run --payload tests/payloads/spin.sh --timeout 20 \
     > "$TMP/spin.log" 2>&1
 ELAPSED=$(( $(date +%s) - START ))
 if grep -q "WALL-CLOCK TIMEOUT" "$TMP/spin.log"; then
@@ -116,7 +116,7 @@ T = sys.argv[1]
 with zipfile.ZipFile(f"{T}/bomb.zip", "w", zipfile.ZIP_DEFLATED) as z:
     z.writestr("b.dat", b"\0" * (256 * 1024 * 1024))
 with zipfile.ZipFile(f"{T}/trav.zip", "w") as z:
-    z.writestr("../../../../etc/ironveil-pwned", b"escaped\n")
+    z.writestr("../../../../etc/diodine-pwned", b"escaped\n")
 buf = io.BytesIO()
 with tarfile.open(fileobj=buf, mode="w") as t:
     l = tarfile.TarInfo("shadow"); l.type = tarfile.SYMTYPE; l.linkname = "/etc/shadow"
@@ -126,20 +126,20 @@ with zipfile.ZipFile(f"{T}/ok.zip", "w", zipfile.ZIP_DEFLATED) as z:
     z.writestr("report.txt", b"clean\n" * 100)
 PY
 
-./bin/ironveil-ingest "$TMP/bomb.zip" "$TMP/o1" --max-output-bytes 20000000 >"$TMP/i1" 2>&1
+./bin/diodine-ingest "$TMP/bomb.zip" "$TMP/o1" --max-output-bytes 20000000 >"$TMP/i1" 2>&1
 [ $? -eq 3 ] && ok "ING-001" "zip bomb refused" || bad "ING-001" "zip bomb not refused"
 [ -e "$TMP/o1" ] && bad "ING-001" "partial output left behind" \
                  || ok "ING-001" "partial output removed"
 
-./bin/ironveil-ingest "$TMP/trav.zip" "$TMP/o2" >"$TMP/i2" 2>&1
+./bin/diodine-ingest "$TMP/trav.zip" "$TMP/o2" >"$TMP/i2" 2>&1
 [ $? -eq 3 ] && ok "ING-002" "path traversal refused" || bad "ING-002" "traversal not refused"
-[ -e /etc/ironveil-pwned ] && bad "ING-002" "TRAVERSAL SUCCEEDED" \
+[ -e /etc/diodine-pwned ] && bad "ING-002" "TRAVERSAL SUCCEEDED" \
                            || ok "ING-002" "nothing written outside destination"
 
-./bin/ironveil-ingest "$TMP/sym.tar" "$TMP/o3" >"$TMP/i3" 2>&1
+./bin/diodine-ingest "$TMP/sym.tar" "$TMP/o3" >"$TMP/i3" 2>&1
 [ $? -eq 3 ] && ok "ING-002" "symlink member refused" || bad "ING-002" "symlink not refused"
 
-./bin/ironveil-ingest "$TMP/ok.zip" "$TMP/o4" >"$TMP/i4" 2>&1
+./bin/diodine-ingest "$TMP/ok.zip" "$TMP/o4" >"$TMP/i4" 2>&1
 [ $? -eq 0 ] && ok "ING-001" "benign archive still expands" \
              || bad "ING-001" "benign archive was wrongly refused"
 
@@ -161,7 +161,7 @@ fi
 # call rather than the class text -- the docstring names O_RDWR precisely to
 # explain why it is not used, and matching prose is not evidence.
 # (O_WRONLY elsewhere in the receiver writes artifacts to disk; unrelated.)
-OPENCALL=$(sed -n '/class FifoChannel/,/^class SocketChannel/p' bin/ironveil-receiver \
+OPENCALL=$(sed -n '/class FifoChannel/,/^class SocketChannel/p' bin/diodine-receiver \
            | grep -F 'os.open(' || true)
 if [ -z "$OPENCALL" ]; then
     bad "OUT-001" "could not find FifoChannel's open call"
@@ -253,7 +253,7 @@ if [ -n "$(escalation_calls "$ESCDIR/advises-heredoc")" ]; then
 else
     ok "TCB-001" "here-doc help text naming sudo is not an invocation (driven)"
 fi
-if grep -qE 'import (zipfile|tarfile|gzip)' bin/ironveil-receiver; then
+if grep -qE 'import (zipfile|tarfile|gzip)' bin/diodine-receiver; then
     bad "OUT-003" "receiver imports an archive library"
 else
     ok "OUT-003" "receiver parses no artifact content"
@@ -280,7 +280,7 @@ else
     # pass vacuously forever. So run the recorder against a cgroup root that
     # cannot exist and require it to say "unknown".
     FB="$TMP/fallback"
-    sed -n '/^record_launch_state() {/,/^}$/p' bin/ironveil-run \
+    sed -n '/^record_launch_state() {/,/^}$/p' bin/diodine-run \
       | sed -e 's|/sys/fs/cgroup/user.slice/user-$(id -u).slice|/nonexistent/cgroup|' \
             -e 's|seq 400|seq 2|' > "$FB.fn"
     # Every variable the recorder reads has to be supplied here. The harness runs
@@ -332,7 +332,7 @@ fi
 
 # ==================================================== host-record integrity
 head_ "H. Host-record integrity (AUD-002)"
-./bin/ironveil-run --payload tests/payloads/reserved-names.sh --timeout 90 \
+./bin/diodine-run --payload tests/payloads/reserved-names.sh --timeout 90 \
     > "$TMP/reserved.log" 2>&1
 RES=$(ls -td quarantine/*/ | head -1)
 
@@ -369,7 +369,7 @@ fi
 
 # ============================================== console path (uncapped by design)
 head_ "I. Console throughput (RES-007)"
-./bin/ironveil-run --payload tests/payloads/console-flood.sh --timeout 10 \
+./bin/diodine-run --payload tests/payloads/console-flood.sh --timeout 10 \
     > "$TMP/flood.log" 2>&1
 FL=$(ls -td quarantine/*/ | head -1)
 FLSZ=$(stat -c %s "$FL/console.log" 2>/dev/null || echo 0)
@@ -400,7 +400,7 @@ STUB="$TMP/stub"; mkdir -p "$STUB"
 printf '#!/bin/sh\nexit 1\n' > "$STUB/aa-exec"; chmod +x "$STUB/aa-exec"
 
 QBEFORE=$(ls -d quarantine/*/ 2>/dev/null | wc -l)
-PATH="$STUB:$PATH" ./bin/ironveil-run --timeout 20 > "$TMP/failclosed.log" 2>&1
+PATH="$STUB:$PATH" ./bin/diodine-run --timeout 20 > "$TMP/failclosed.log" 2>&1
 RC=$?
 if [ "$RC" -eq 2 ] && grep -q "REFUSING TO RUN" "$TMP/failclosed.log"; then
     ok "VMM-002" "run refuses to start with no profile loaded (exit 2)"
@@ -414,7 +414,7 @@ check VMM-002 "refused run leaves no quarantine directory" "$QAFTER" "$QBEFORE"
 
 # And the waiver must work, be explicit, and be recorded -- an escape hatch that
 # cannot be exercised is as bad as a default that cannot be refused.
-PATH="$STUB:$PATH" ./bin/ironveil-run --allow-unconfined --timeout 90 \
+PATH="$STUB:$PATH" ./bin/diodine-run --allow-unconfined --timeout 90 \
     > "$TMP/waived.log" 2>&1
 WD=$(ls -td quarantine/*/ | head -1)
 if grep -q "UNCONFINED" "$TMP/waived.log" \
@@ -440,7 +440,7 @@ cp /bin/sleep "$TMP/clamd" 2>/dev/null || true
 DECOY=$!
 sleep 0.3
 
-./bin/ironveil-run --timeout 60 --quarantine-warn-mb 0 > "$TMP/loud.log" 2>&1
+./bin/diodine-run --timeout 60 --quarantine-warn-mb 0 > "$TMP/loud.log" 2>&1
 if grep -q "QUAR-001 WARNING" "$TMP/loud.log"; then
     ok "QUAR-001" "a running consumer is detected and reported"
 else
@@ -468,7 +468,7 @@ done
 [ -d "/proc/$DECOY" ] && bad "QUAR-001" "test decoy survived the kill; silence check is unreliable"
 
 # ...and must go quiet again, or it is an alarm that says nothing.
-./bin/ironveil-run --timeout 60 --quarantine-warn-mb 1000000 > "$TMP/quiet.log" 2>&1
+./bin/diodine-run --timeout 60 --quarantine-warn-mb 1000000 > "$TMP/quiet.log" 2>&1
 if grep -q "QUAR-001 WARNING" "$TMP/quiet.log"; then
     bad "QUAR-001" "warned with no consumer running"
 elif grep -q "RES-008 WARNING" "$TMP/quiet.log"; then
@@ -611,10 +611,10 @@ else
         # --- driven positive -------------------------------------------------
         # A denial counter that has never counted a denial is not evidence. Drive
         # a REAL one against the REAL profile: aa-exec transitions into
-        # ironveil-qemu, which does not grant /etc/hostname, so the open is
+        # diodine-qemu, which does not grant /etc/hostname, so the open is
         # refused. No root, no profile edit, no test hook in the product.
         DLOG="$TMP/driven.log"
-        ./bin/ironveil-run --timeout 45 > "$DLOG" 2>&1 &
+        ./bin/diodine-run --timeout 45 > "$DLOG" 2>&1 &
         DPID=$!
         DDIR=""
         for _ in $(seq 200); do
@@ -637,7 +637,7 @@ else
         if [ "$DREADY" -eq 1 ]; then
             # Assert the driver itself actually fires. A refusal that silently
             # succeeded would make the count-zero result below meaningless.
-            if aa-exec -p ironveil-qemu -- /bin/cat /etc/hostname >/dev/null 2>&1; then
+            if aa-exec -p diodine-qemu -- /bin/cat /etc/hostname >/dev/null 2>&1; then
                 bad "AUD-004" "driver did not provoke a denial: the profile permitted /etc/hostname"
             else
                 ok "AUD-004" "driver provoked a real refusal against the live profile"
@@ -659,7 +659,7 @@ else
         # the same distinction AUD-001 already draws between unknown and
         # unconfined. A clean run must report count 0 AND checked true.
         CLOG="$TMP/clean.log"
-        ./bin/ironveil-run --timeout 45 > "$CLOG" 2>&1
+        ./bin/diodine-run --timeout 45 > "$CLOG" 2>&1
         CDIR=$(ls -td quarantine/*/ | head -1)
         CN=$(DJ count "$CDIR/RUN.json")
         CC=$(DJ checked "$CDIR/RUN.json")

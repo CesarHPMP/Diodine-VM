@@ -1,22 +1,22 @@
-# Ironveil VMM confinement (VMM-002).
+# Diodine VMM confinement (VMM-002).
 #
 # A named profile -- it is NOT attached to the qemu binary path, so it applies
-# only to VMs launched via ironveil-run's aa-exec, and leaves any other QEMU on
+# only to VMs launched via diodine-run's aa-exec, and leaves any other QEMU on
 # this machine alone.
 #
-# This is a template. policy/apparmor/install substitutes @IRONVEIL_ROOT@ and
+# This is a template. policy/apparmor/install substitutes @DIODINE_ROOT@ and
 # loads the result.
 #
 # STATUS: written against the Debian 13 / QEMU 10 layout and parser-checked,
 # but exercised only on this host. Treat a denial in dmesg as a bug in this
 # profile until proven otherwise, and re-check it after any QEMU upgrade:
-#     sudo dmesg -w | grep -i 'apparmor.*ironveil'
+#     sudo dmesg -w | grep -i 'apparmor.*diodine'
 
 abi <abi/4.0>,
 
 include <tunables/global>
 
-profile ironveil-qemu flags=(attach_disconnected) {
+profile diodine-qemu flags=(attach_disconnected) {
   include <abstractions/base>
 
   # NET-001/NET-002 as a second, independent enforcement point. The command
@@ -44,17 +44,17 @@ profile ironveil-qemu flags=(attach_disconnected) {
   /dev/kvm                         rw,
 
   # --- the base image: read-only, and only these two files (FS-003) --------
-  @IRONVEIL_ROOT@/image/base/vmlinuz    r,
-  @IRONVEIL_ROOT@/image/base/initramfs  r,
+  @DIODINE_ROOT@/image/base/vmlinuz    r,
+  @DIODINE_ROOT@/image/base/initramfs  r,
 
   # --- per-run state: the assembled initrd and the output FIFO pair --------
-  owner /run/user/[0-9]*/ironveil/                 rw,
-  owner /run/user/[0-9]*/ironveil/**               rw,
-  owner /tmp/ironveil/**                           rw,
+  owner /run/user/[0-9]*/diodine/                 rw,
+  owner /run/user/[0-9]*/diodine/**               rw,
+  owner /tmp/diodine/**                           rw,
 
   # --- the console log, write-only ----------------------------------------
   # QEMU appends the guest console here. It is never read back by the guest.
-  owner @IRONVEIL_ROOT@/quarantine/**/console.log  w,
+  owner @DIODINE_ROOT@/quarantine/**/console.log  w,
 
   # --- host introspection QEMU needs to start ------------------------------
   @{PROC}/@{pid}/task/@{tid}/comm       rw,

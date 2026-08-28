@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Adversarial framing corpus against the real receiver (RES-006, OUT-003, AUD-002).
 
-The receiver's header path is the only thing in Ironveil that parses
-guest-controlled structure, and it is reachable WITHOUT a VM: ironveil-receiver
+The receiver's header path is the only thing in Diodine that parses
+guest-controlled structure, and it is reachable WITHOUT a VM: diodine-receiver
 --fifo accepts any FIFO. So this drives the real binary directly -- milliseconds
 per case instead of ~15s, which is what makes a corpus this size affordable.
 
@@ -17,7 +17,7 @@ Two design rules, both from NEXT.md:
      a corpus that silently built nothing cannot report success.
 
 Deliberately NOT run through a guest. guest/init always writes payload.rc and
-then runs ironveil-send after the payload returns, so every in-VM malformed-frame
+then runs diodine-send after the payload returns, so every in-VM malformed-frame
 test is followed by a second, well-formed sender on the same stream. That is a
 real confound; here there is exactly one writer and it is this file.
 """
@@ -32,9 +32,9 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-RECEIVER = os.path.join(ROOT, "bin", "ironveil-receiver")
+RECEIVER = os.path.join(ROOT, "bin", "diodine-receiver")
 
-MAGIC = b"IVF1"
+MAGIC = b"DVF1"
 HEADER = struct.Struct(">4sHQ")
 
 # Small enough to keep cases fast; the receiver's logic is cap-relative.

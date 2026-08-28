@@ -1,4 +1,4 @@
-# Ironveil Phase 1 — machine-readable policy.
+# Diodine VM Phase 1 — machine-readable policy.
 #
 # Every statement here is an assertion that Phase 2 adversarial tests must be
 # able to check. A test that does not map to a statement in this file is not
@@ -43,7 +43,7 @@ policy:
     claim: The host never mounts, loop-mounts, or otherwise parses a filesystem
            authored by the guest.
     enforced_by: output channel is a byte stream; no block device crosses the
-                 boundary; ironveil-run never invokes mount
+                 boundary; diodine-run never invokes mount
     verify: audit the launcher and receiver for mount/losetup calls
     status: enforced
 
@@ -93,7 +93,7 @@ policy:
     enforced_by: QEMU's pipe chardev is backed by a FIFO pair -- it writes guest
                  output to iv.out and reads host input from iv.in. The launcher
                  creates both (QEMU will not start otherwise) and nothing in
-                 Ironveil ever opens iv.in; the receiver opens only iv.out, and
+                 Diodine ever opens iv.in; the receiver opens only iv.out, and
                  only O_RDONLY. With no writer, the guest's reads see EOF
                  forever. Directionality is a property of which descriptors
                  exist, so it survives a compromised receiver.
@@ -122,7 +122,7 @@ policy:
     status: measured
     note: |
       Measured on the development host, replacing the earlier estimate of "a few
-      bits per second" in ironveil.md, which was a guess in the wrong direction.
+      bits per second" in diodine.md, which was a guess in the wrong direction.
 
         buffer depth       585728 bytes (0.56 MiB), identical across runs
         detection floor    ~8 ms, the time to refill that buffer at ~73 MB/s
@@ -201,7 +201,7 @@ policy:
 
   - id: RES-008
     claim: Quarantine growth across runs is bounded by operator retention policy,
-           not by Ironveil.
+           not by Diodine.
     enforced_by: nothing bounds it -- RES-006 caps a single run at 256 MB and
                  nothing caps the number of runs. The launcher reports the
                  cumulative total after every run and warns past
@@ -211,7 +211,7 @@ policy:
     status: not-enforced
     note: |
       Reporting is not a bound and the status stays not-enforced. What changed is
-      that the number is now impossible to miss, which is the most Ironveil can
+      that the number is now impossible to miss, which is the most Diodine can
       honestly do here.
 
       Nothing prunes automatically, deliberately. Auto-deleting quarantined
@@ -286,13 +286,13 @@ policy:
   - id: ING-001
     claim: Decompression of exported archives is bounded by ratio, absolute
            output size, file count, and nesting depth.
-    enforced_by: ironveil-ingest; it never calls extractall
+    enforced_by: diodine-ingest; it never calls extractall
     verify: a zip bomb is refused without exhausting storage
     status: enforced
 
   - id: ING-002
     claim: Ingest cannot write outside its destination directory.
-    enforced_by: ironveil-ingest rejects absolute paths, traversal, symlinks,
+    enforced_by: diodine-ingest rejects absolute paths, traversal, symlinks,
                  hardlinks, and non-regular members
     verify: an archive containing ../../etc/passwd and a symlink member is refused
     status: enforced
@@ -301,7 +301,7 @@ policy:
     claim: Every expanded file can be attributed to the archive it came from, and
            guest-chosen member names share no namespace with the directories
            ingest expands into.
-    enforced_by: ironveil-ingest names a nested archive's expansion by the
+    enforced_by: diodine-ingest names a nested archive's expansion by the
                  archive's path RELATIVE to its level rather than by basename,
                  and places it in a sibling `.nested` tree rather than in the
                  level itself, so member names and expansion directories cannot
@@ -348,17 +348,17 @@ policy:
             quarantine_consumers_running; a host with none stays quiet
     status: partial
     note: |
-      Markers are advisory and always will be -- Ironveil cannot make a
+      Markers are advisory and always will be -- Diodine cannot make a
       third-party agent honour them. Detection is the honest ceiling: it converts
       a silent weakness into a visible one, per run, in the run's own record.
 
       It warns rather than refusing, unlike VMM-002. These are host-wide desktop
-      services that Ironveil cannot reconfigure, and refusing to run on any
+      services that Diodine cannot reconfigure, and refusing to run on any
       machine with a file indexer would make the tool unusable without making the
       quarantine any safer. Fail-closed is right when the tool can fix the
       condition or the operator can; neither holds here.
 
-      Real enforcement is a host decision and out of Ironveil's reach: a dedicated
+      Real enforcement is a host decision and out of Diodine's reach: a dedicated
       filesystem for quarantine mounted nodev, nosuid, noexec, plus per-tool
       exclusions. On the development host quarantine sits on / with plain
       rw,relatime, so nothing structural separates it from the rest of the home
@@ -373,7 +373,7 @@ policy:
     claim: Every run records the boundary state that was actually live while it
            ran, measured from the running VMM rather than declared by the
            launcher's intent.
-    enforced_by: ironveil-run writes RUN.json into the run's quarantine
+    enforced_by: diodine-run writes RUN.json into the run's quarantine
                  directory, reading attr/current, seccomp mode, uid and the
                  cgroup limits back from the live process
     verify: RUN.json exists for the run; its observed flag is true; its policy
@@ -435,16 +435,16 @@ policy:
     claim: Every run records whether MAC denial checking was available to it, and
            when it was, every denial the VMM's confinement profile produced during
            that run.
-    enforced_by: ironveil-run anchors a journal position before launch and reads
+    enforced_by: diodine-run anchors a journal position before launch and reads
                  the window back after the VMM has exited, matching records
-                 carrying both apparmor="DENIED" and profile="ironveil-qemu".
+                 carrying both apparmor="DENIED" and profile="diodine-qemu".
                  Availability is decided by a live read, never by group
                  membership. The result lands in the run's RUN.json as a denials
                  block; when the read is unavailable that block says
                  checked=false and gives the reason
     verify: RUN.json carries a denials block; tests/run-checks FAILS when it reads
             checked=false rather than skipping; the counter is driven positive by
-            aa-exec -p ironveil-qemu -- /bin/cat /etc/hostname, which is refused by
+            aa-exec -p diodine-qemu -- /bin/cat /etc/hostname, which is refused by
             the real profile and needs no privilege, and driven negative by a
             window containing no denial, which must report count 0 and not
             checked=false
@@ -458,7 +458,7 @@ policy:
 
       Who tolerates the gap is the whole design. The launcher records and keeps
       running, the way QUAR-001 warns rather than refusing: journal access is a
-      host-wide condition Ironveil cannot fix, and refusing every run on an
+      host-wide condition Diodine cannot fix, and refusing every run on an
       unprovisioned host would not make any run safer. tests/run-checks does NOT
       tolerate it and fails, because a suite reporting all-green while blind to
       denials is the exact reassuring-failure shape Phase 1 kept finding in its
@@ -496,12 +496,12 @@ policy:
 
   - id: VMM-002
     claim: The VMM process is confined by mandatory access control.
-    enforced_by: AppArmor profile ironveil-qemu, applied via aa-exec
+    enforced_by: AppArmor profile diodine-qemu, applied via aa-exec
     verify: read attr/current for the qemu process, located via the run's cgroup
             scope rather than by process name -- comm truncates at 15 characters,
             so qemu-system-x86_64 cannot be matched by name, and a command-line
             match will match the searching process itself. Confined runs read
-            "ironveil-qemu (enforce)".
+            "diodine-qemu (enforce)".
     status: enforced
     note: |
       Fail-closed. A run whose profile is not loaded REFUSES to start and exits
@@ -530,15 +530,15 @@ policy:
 
   - id: TCB-001
     claim: No root-privileged daemon is introduced into the trusted computing
-           base by Ironveil itself.
+           base by Diodine itself.
     enforced_by: direct QEMU invocation; no libvirtd
-    verify: no Ironveil component runs as uid 0
+    verify: no Diodine component runs as uid 0
     status: enforced
 
   - id: PLAT-001
     claim: Microarchitectural side channels are out of scope and inherited from
            the platform.
     enforced_by: nothing — platform responsibility
-    verify: not verified by Ironveil; see the microarchitectural section of the
+    verify: not verified by Diodine; see the microarchitectural section of the
             design document
     status: inherited

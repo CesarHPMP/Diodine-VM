@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ironveil host-side output receiver.
+"""Diodine host-side output receiver.
 
 Holds the read end of the FIFO that the guest's virtio-serial port is wired
 to, and copies framed bytes from the guest into a per-run quarantine directory.
@@ -13,7 +13,7 @@ Security properties this program is responsible for (see policy/policy.yaml):
            ONLY <path>.out, and only O_RDONLY. It never opens <path>.in at
            all, so it holds no descriptor through which a byte could reach the
            guest -- no writer exists, so the guest's reads see EOF forever.
-           Verify by listing /proc/<pid>/fd for every Ironveil process.
+           Verify by listing /proc/<pid>/fd for every Diodine process.
 
            (The earlier design used a unix socket and shutdown(SHUT_WR). That
            is incompatible with QEMU: the socket chardev reads the resulting
@@ -28,7 +28,7 @@ Security properties this program is responsible for (see policy/policy.yaml):
 
 Wire format (all integers big-endian, no alignment, no nesting):
 
-    magic     4 bytes   b"IVF1"
+    magic     4 bytes   b"DVF1"
     name_len  2 bytes   uint16, 1..255
     size      8 bytes   uint64
     name      name_len bytes, ASCII, [A-Za-z0-9._-] only
@@ -51,7 +51,7 @@ import struct
 import sys
 import time
 
-MAGIC = b"IVF1"
+MAGIC = b"DVF1"
 HEADER = struct.Struct(">4sHQ")
 NAME_RE = re.compile(rb"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$")
 CHUNK = 65536
@@ -149,7 +149,7 @@ class FifoChannel:
 class SocketChannel:
     """Unix-socket variant, kept for standalone testing of the wire format.
 
-    Not used by ironveil-run: see the docstring for why a socket cannot carry
+    Not used by diodine-run: see the docstring for why a socket cannot carry
     the OUT-001 guarantee against QEMU's chardev.
     """
 
@@ -268,10 +268,10 @@ def receive(chan, outdir, limits, deadline):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Ironveil output receiver")
+    ap = argparse.ArgumentParser(description="Diodine output receiver")
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--fifo", help="path to QEMU's outbound FIFO (<path>.out). "
-                                    "This is what ironveil-run uses.")
+                                    "This is what diodine-run uses.")
     src.add_argument("--socket", help="unix socket to own (testing only; a "
                                       "socket cannot carry OUT-001 -- see the "
                                       "module docstring)")

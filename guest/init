@@ -1,5 +1,5 @@
 #!/bin/sh
-# Ironveil guest init -- PID 1 inside the disposable analysis VM.
+# Diodine guest init -- PID 1 inside the disposable analysis VM.
 #
 # The guest is RAM-only: this initramfs IS the root filesystem, there is no
 # block device, and nothing here survives poweroff. Everything this script
@@ -8,19 +8,19 @@
 #
 # Lifecycle:
 #     mount pseudo-filesystems
-#     run /ironveil/payload/run under a timeout
-#     emit everything in /ironveil/out through the output port
+#     run /diodine/payload/run under a timeout
+#     emit everything in /diodine/out through the output port
 #     power off
 #
 # init must never return -- that panics the kernel -- so every path ends in
 # poweroff.
 set -u
 
-PORT=/dev/virtio-ports/org.ironveil.out
-OUTDIR=/ironveil/out
-PAYLOAD=/ironveil/payload/run
+PORT=/dev/virtio-ports/org.diodine.out
+OUTDIR=/diodine/out
+PAYLOAD=/diodine/payload/run
 
-log() { echo "[ironveil-guest] $*" > /dev/console 2>/dev/null; }
+log() { echo "[diodine-guest] $*" > /dev/console 2>/dev/null; }
 
 poweroff_now() {
     log "powering off"
@@ -48,8 +48,8 @@ exec > /dev/console 2>&1 < /dev/null
 
 log "kernel $(uname -r) up"
 
-kparam() {  # kparam NAME DEFAULT -- read ironveil.NAME= from the kernel cmdline
-    _v=$(sed -n "s/.*ironveil\.$1=\([^ ]*\).*/\1/p" /proc/cmdline)
+kparam() {  # kparam NAME DEFAULT -- read diodine.NAME= from the kernel cmdline
+    _v=$(sed -n "s/.*diodine\.$1=\([^ ]*\).*/\1/p" /proc/cmdline)
     [ -n "$_v" ] && echo "$_v" || echo "$2"
 }
 
@@ -63,7 +63,7 @@ PAYLOAD_TIMEOUT=$(kparam payload_timeout 120)
 find_port() {
     for _d in /sys/class/virtio-ports/*; do
         [ -r "$_d/name" ] || continue
-        if [ "$(cat "$_d/name" 2>/dev/null)" = "org.ironveil.out" ]; then
+        if [ "$(cat "$_d/name" 2>/dev/null)" = "org.diodine.out" ]; then
             echo "/dev/$(basename "$_d")"
             return 0
         fi
@@ -77,7 +77,7 @@ if RESOLVED=$(find_port); then
     [ -e "$PORT" ] || PORT="$RESOLVED"
     log "output port: $RESOLVED (as $PORT)"
 else
-    log "FATAL: no virtio port named org.ironveil.out"
+    log "FATAL: no virtio port named org.diodine.out"
     log "virtio-ports present: $(ls /sys/class/virtio-ports 2>/dev/null | tr '\n' ' ')"
     log "char devices: $(ls /dev/vport* 2>/dev/null | tr '\n' ' ')"
     poweroff_now 1
@@ -118,7 +118,7 @@ if [ "$#" -eq 0 ]; then
     log "no artifacts to export"
 else
     log "exporting $# artifact(s)"
-    IRONVEIL_PORT="$PORT" /usr/local/bin/ironveil-send "$@" \
+    DIODINE_PORT="$PORT" /usr/local/bin/diodine-send "$@" \
         || log "export failed (receiver may have enforced a cap)"
 fi
 

@@ -1,8 +1,8 @@
-# Ironveil — Phase 2 (in progress)
+# Diodine VM — Phase 2 (in progress)
 
 A capability-restricted malware analysis environment.
 
-`ironveil.md` is the design document and threat model. `policy/policy.yaml` is
+`diodine.md` is the design document and threat model. `policy/policy.yaml` is
 the machine-readable policy: every security claim, where it is enforced, how it
 is verified, and — importantly — which claims are **not** enforced yet.
 
@@ -22,7 +22,7 @@ records what is deliberately still incomplete.
 ./image/build-base-image        # once: ~48 MB of downloads, checksum-verified
 sudo policy/apparmor/install    # once: load the VMM confinement profile
 sudo usermod -aG systemd-journal $USER   # once: denial visibility -- then LOG OUT
-./bin/ironveil-run              # boot a disposable VM, run the default probe
+./bin/diodine-run              # boot a disposable VM, run the default probe
 ./tests/run-checks              # verify the boundary is configured as claimed
 ./tests/adversarial/run         # hostile inputs against the receiver and ingest
 ```
@@ -35,7 +35,7 @@ is recorded in that run's `RUN.json`.
 The `usermod` step is what makes `AUD-004` work: a confinement profile that
 silently refuses something is the failure this project has already had — the
 AppArmor NUMA denial fired on *every* confined run while 26/26 checks passed
-twice. Reading denials needs journal access, and `TCB-001` forbids Ironveil a
+twice. Reading denials needs journal access, and `TCB-001` forbids Diodine a
 privileged component, so the operator grants it once and the launcher stays
 unprivileged.
 
@@ -47,12 +47,12 @@ rather than reporting all-green while blind.
 Analysing something:
 
 ```sh
-./bin/ironveil-run --payload ./my-analysis.sh --sample ./suspicious.bin
-./bin/ironveil-ingest quarantine/<run-id> /tmp/expanded    # bounded expansion
+./bin/diodine-run --payload ./my-analysis.sh --sample ./suspicious.bin
+./bin/diodine-ingest quarantine/<run-id> /tmp/expanded    # bounded expansion
 ```
 
 The payload runs as root inside the guest. Anything it writes to
-`/ironveil/out/` is exported; the sample appears at `/ironveil/sample/`.
+`/diodine/out/` is exported; the sample appears at `/diodine/sample/`.
 
 Each run directory separates the two trust domains by layout:
 
@@ -70,7 +70,7 @@ a host record no matter what it calls itself (AUD-002).
 ## How it works
 
 ```
-  ironveil-run
+  diodine-run
       │
       ├─ receiver ────────── opens ONLY iv.out, O_RDONLY ──┐
       │                                                     │
@@ -87,7 +87,7 @@ a host record no matter what it calls itself (AUD-002).
                                             ▼
                                    quarantine/<run-id>/artifacts/
                                             │
-                                   ironveil-ingest (bounded)
+                                   diodine-ingest (bounded)
 ```
 
 Four decisions carry most of the security value:
@@ -147,23 +147,23 @@ warns if `--timeout` goes past an hour, where that figure stops being small.
 ## Layout
 
 ```
-ironveil.md              design document and threat model
+diodine.md              design document and threat model
 NEXT.md                  Phase 2 plan: workstreams, test rules, live-sample gate
 BACKLOG.md               deferred BY DESIGN, with what would close each item
 policy/policy.yaml       every claim, its enforcement point, its status
 policy/apparmor/         VMM confinement profile and installer
-bin/ironveil-run         hardened launcher; the QEMU args ARE the policy
-bin/ironveil-receiver    host-side output receiver; parses nothing
-bin/ironveil-ingest      bounded decompression; the only thing that parses
+bin/diodine-run         hardened launcher; the QEMU args ARE the policy
+bin/diodine-receiver    host-side output receiver; parses nothing
+bin/diodine-ingest      bounded decompression; the only thing that parses
 guest/init               guest PID 1
-guest/ironveil-send      guest-side artifact emitter
+guest/diodine-send      guest-side artifact emitter
 image/build-base-image   builds the RAM-only Alpine base
 tests/run-checks         verification harness, keyed to policy IDs
 tests/adversarial/       Phase 2 hostile-input suite (frames, ingest)
 quarantine/              untrusted output (gitignored)
 ```
 
-`bin/ironveil-run --help` lists every knob. Reading the `ARGS` array in that
+`bin/diodine-run --help` lists every knob. Reading the `ARGS` array in that
 script tells you the guest's entire hardware attack surface — `-nodefaults`
 means nothing is attached that is not named there.
 

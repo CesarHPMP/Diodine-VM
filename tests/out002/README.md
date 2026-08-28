@@ -34,7 +34,7 @@ noise enlarges the refill time. The guest cannot have both.
 
 Buffer depth and long-stall fidelity:
 
-    ./bin/ironveil-run --payload tests/out002/probe --timeout 90 \
+    ./bin/diodine-run --payload tests/out002/probe --timeout 90 \
         --max-artifact 1073741824 --max-total 2147483648 &
     ./tests/out002/modulate --pulses 20000 --repeat 1 --gap-ms 10 --out /tmp/s.txt
 
@@ -51,7 +51,7 @@ Detection floor, one duration per run:
 ## Two ways this measurement lied before the instrument was fixed
 
 **The modulator stopped the wrong process.** Matching the receiver by command
-line found the pyenv shim — `bash pyenv-exec python3 .../ironveil-receiver` —
+line found the pyenv shim — `bash pyenv-exec python3 .../diodine-receiver` —
 whose argv contains the receiver's path while the process doing the reading is
 its child. `SIGSTOP` on the wrapper stops nothing. The reader kept draining and
 every arm built on it reported *no backpressure at all*, up to 512 MB, which
@@ -75,7 +75,7 @@ fail.
 
 ## Why the carrier looks the way it does
 
-The probe emits a large `IVF1` frame and uses that stream as the carrier. Raw
+The probe emits a large `DVF1` frame and uses that stream as the carrier. Raw
 bytes at the port would fail the receiver's magic check and abort the stream, so
 the carrier has to be a legitimate artifact that happens to be big.
 

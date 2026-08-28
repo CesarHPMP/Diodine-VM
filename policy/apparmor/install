@@ -1,18 +1,18 @@
 #!/bin/bash
-# Load the Ironveil VMM confinement profile. Requires root.
+# Load the Diodine VMM confinement profile. Requires root.
 #
 #     sudo policy/apparmor/install            # load
 #     sudo policy/apparmor/install --remove   # unload
 #
 # The profile is named (not path-attached), so loading it does not change the
-# behaviour of any other QEMU on this machine. Only ironveil-run opts in, via
+# behaviour of any other QEMU on this machine. Only diodine-run opts in, via
 # aa-exec.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
-TEMPLATE="$HERE/ironveil-qemu.in"
-TARGET=/etc/apparmor.d/ironveil-qemu
+TEMPLATE="$HERE/diodine-qemu.in"
+TARGET=/etc/apparmor.d/diodine-qemu
 
 [ "$(id -u)" -eq 0 ] || { echo "must be run as root" >&2; exit 1; }
 command -v apparmor_parser >/dev/null || { echo "apparmor_parser not found" >&2; exit 1; }
@@ -20,11 +20,11 @@ command -v apparmor_parser >/dev/null || { echo "apparmor_parser not found" >&2;
 if [ "${1:-}" = "--remove" ]; then
     [ -f "$TARGET" ] && apparmor_parser -R "$TARGET" || true
     rm -f "$TARGET"
-    echo "ironveil-qemu profile removed"
+    echo "diodine-qemu profile removed"
     exit 0
 fi
 
-sed "s|@IRONVEIL_ROOT@|$ROOT|g" "$TEMPLATE" > "$TARGET"
+sed "s|@DIODINE_ROOT@|$ROOT|g" "$TEMPLATE" > "$TARGET"
 chmod 0644 "$TARGET"
 
 echo "loading profile for repository root: $ROOT"
@@ -32,15 +32,15 @@ apparmor_parser -r -W "$TARGET"
 
 echo
 echo "loaded. verify with:"
-echo "    aa-status | grep ironveil"
-echo "then re-run ironveil-run; it should report 'confining under ironveil-qemu'."
+echo "    aa-status | grep diodine"
+echo "then re-run diodine-run; it should report 'confining under diodine-qemu'."
 echo
 echo "SECOND PROVISIONING STEP -- denial visibility (AUD-004)."
 echo
 echo "A loaded profile that silently refuses something is the failure this"
 echo "project has already had: the NUMA denial fired on every confined run"
 echo "while 26/26 checks passed twice. Reading denials needs journal access,"
-echo "and TCB-001 forbids Ironveil a privileged component -- so the operator"
+echo "and TCB-001 forbids Diodine a privileged component -- so the operator"
 echo "grants it once, out of band, and the launcher stays unprivileged:"
 echo
 echo "    sudo usermod -aG systemd-journal ${SUDO_USER:-YOUR_USER}"

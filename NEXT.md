@@ -1,6 +1,6 @@
-# Ironveil — Phase 2 plan
+# Diodine VM — Phase 2 plan
 
-`ironveil.md` sketches Phase 2 as "adversarial testing" and lists the surfaces to
+`diodine.md` sketches Phase 2 as "adversarial testing" and lists the surfaces to
 attack. This document is the operational version: what to build, in what order,
 and what has to be true before live samples are allowed anywhere near it.
 
@@ -100,7 +100,7 @@ open will certify a boundary that does not hold.
    not. `modulate` finds the reader by who has `iv.out` open, which is the same
    argument `OUT-001` rests on.
 4. **Never pipe a harness into another command.** The exit status is the result.
-5. **Measure, don't estimate.** `ironveil.md` guessed the reverse channel at "a
+5. **Measure, don't estimate.** `diodine.md` guessed the reverse channel at "a
    few bits per second" and the guess was wrong in both directions — the rate is
    far higher, the per-run total far smaller. Every limitation in `policy.yaml`
    should end up with a number and a method to reproduce it.
@@ -120,12 +120,12 @@ Ordered by what unblocks the most.
 The NUMA denial fired on every confined run, cost nothing visible, and passed
 26/26 checks twice. A check that fails a run producing *any* AppArmor denial
 would have caught it on day one. But reading the audit log needs root, and
-`TCB-001` forbids Ironveil a privileged component.
+`TCB-001` forbids Diodine a privileged component.
 
 So the evidence most needed is the evidence the threat model forbids collecting.
 Options, none free:
 
-- A one-shot root helper invoked only by `tests/`, never by `ironveil-run` —
+- A one-shot root helper invoked only by `tests/`, never by `diodine-run` —
   keeps the launcher clean but puts root in the test path.
 - Operator-provisioned audit access (group membership, or a systemd unit that
   copies the relevant log lines somewhere readable).
@@ -145,7 +145,7 @@ records that denial-checking was unavailable. Never silence.
 payloads are cooperative probes confirming the boundary is configured as claimed.
 Phase 2 is hostile workloads trying to break it.
 
-Build against the surfaces `ironveil.md` lists (device and `ioctl` surfaces,
+Build against the surfaces `diodine.md` lists (device and `ioctl` surfaces,
 memory mappings and DMA, paravirtual channels, malformed frames aimed at the
 receiver, malformed archives aimed at ingest, exhaustion in every dimension), with
 each test naming the statement it attacks. New attack, no statement: add the
@@ -169,7 +169,7 @@ Specific targets suggested by Phase 1:
 Acceptance: every test names a statement; every test has been shown to fail
 against a deliberately weakened configuration.
 
-**Landed:** the framing corpus (43 cases, driving `ironveil-receiver` directly)
+**Landed:** the framing corpus (43 cases, driving `diodine-receiver` directly)
 and the ingest corpus (18 cases). Between them they cover the malformed-framing
 and ingest targets above. `AUD-003` now computes coverage against this suite too,
 so a statement checked only here is not reported as an uncovered gap.
@@ -187,7 +187,7 @@ of the two plausible directory namings.
 
 **Still to come:** exhaustion (every cap in `RES-001`..`RES-008`, from inside,
 and in combination), and the in-VM cases. Note the confound for anything driven
-through a guest: `guest/init` runs `ironveil-send` after the payload returns, so
+through a guest: `guest/init` runs `diodine-send` after the payload returns, so
 a malformed-frame test in a VM is always followed by a second, well-formed sender
 on the same stream. The framing corpus avoids it by driving the receiver
 directly; the exhaustion work cannot, and has to account for it.
@@ -251,12 +251,12 @@ enough to keep a *running* indexer out, empirically, with one installed.
 ### W7 — `RES-008`, retention
 
 Reporting landed. If a bound is wanted, the honest options are a filesystem quota
-(which `ironveil.md` already lists) or an explicit operator-configured retention
-policy. Neither should be automatic deletion inside `ironveil-run`.
+(which `diodine.md` already lists) or an explicit operator-configured retention
+policy. Neither should be automatic deletion inside `diodine-run`.
 
 ### W8 — The live-sample gate
 
-`ironveil.md` is right that live malware waits for Phase 2 to demonstrate the
+`diodine.md` is right that live malware waits for Phase 2 to demonstrate the
 boundary holds. Concretely, all of these before any real sample:
 
 1. W1 done — denials are visible or explicitly recorded as unchecked.
@@ -270,7 +270,7 @@ boundary holds. Concretely, all of these before any real sample:
 
 ## Research questions, updated
 
-`ironveil.md` lists ten. Phase 1 answered some:
+`diodine.md` lists ten. Phase 1 answered some:
 
 - **Q7, measured reverse bandwidth** — answered, with caveats (W4).
 - **Q9, output storage exhaustion** — partly: per-run caps hold, cross-run is

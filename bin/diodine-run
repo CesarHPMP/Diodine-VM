@@ -1,5 +1,5 @@
 #!/bin/bash
-# ironveil-run -- launch one disposable analysis VM.
+# diodine-run -- launch one disposable analysis VM.
 #
 # The QEMU command line built here IS the security policy. Every device the
 # guest can see is listed explicitly; -nodefaults means nothing else is
@@ -39,15 +39,15 @@ ALLOW_UNCONFINED=0
 QUARANTINE_WARN_MB=5000
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 
-say() { printf '\033[1m[ironveil]\033[0m %s\n' "$*" >&2; }
-die() { printf '\033[1;31m[ironveil] error:\033[0m %s\n' "$*" >&2; exit 1; }
+say() { printf '\033[1m[diodine]\033[0m %s\n' "$*" >&2; }
+die() { printf '\033[1;31m[diodine] error:\033[0m %s\n' "$*" >&2; exit 1; }
 
 usage() {
     cat >&2 <<USAGE
-usage: ironveil-run [options]
+usage: diodine-run [options]
 
   --payload FILE        script to run inside the guest (default: built-in probe)
-  --sample FILE         file to place at /ironveil/sample/ inside the guest
+  --sample FILE         file to place at /diodine/sample/ inside the guest
   --mem MB              guest memory cap            (default $MEM_MB)
   --cpus N              guest vcpus                 (default $CPUS)
   --cpu-quota PCT       host CPU cap, % of one core (default $CPU_QUOTA)
@@ -108,7 +108,7 @@ command -v qemu-system-x86_64 >/dev/null || die "qemu-system-x86_64 not found"
 # "not loaded" however the profile is installed -- which made this claim
 # unsatisfiable rather than merely unmet. aa-exec answers it unprivileged.
 # QUAR-001. The exclusion markers in quarantine/ are advisory and always will be
-# -- Ironveil cannot make a third-party agent honour them. What it CAN do is say
+# -- Diodine cannot make a third-party agent honour them. What it CAN do is say
 # whether any such agent is running right now, which turns a silent weakness into
 # a visible one. This warns and never blocks: these are host-wide desktop
 # services, and refusing to run on any machine with a file indexer would make the
@@ -146,14 +146,14 @@ fi
 
 APPARMOR_CONFINE=0
 if command -v aa-exec >/dev/null 2>&1 \
-   && aa-exec -p ironveil-qemu -- /bin/true 2>/dev/null; then
+   && aa-exec -p diodine-qemu -- /bin/true 2>/dev/null; then
     APPARMOR_CONFINE=1
 elif [ "$ALLOW_UNCONFINED" -eq 0 ]; then
     # Fail closed. Degrading quietly was the wrong default: the warning went to
     # stdout, scrolled past, and nothing on disk recorded that a run had no MAC
     # confinement -- which is how eight consecutive runs went unconfined here
     # without anyone noticing. Waiving it now has to be said on the command line.
-    say "REFUSING TO RUN: AppArmor profile ironveil-qemu is not loaded (VMM-002)"
+    say "REFUSING TO RUN: AppArmor profile diodine-qemu is not loaded (VMM-002)"
     say "  load it once with:  sudo policy/apparmor/install"
     say "  or waive it with:   --allow-unconfined  (recorded in RUN.json)"
     exit 2
@@ -169,7 +169,7 @@ fi
 # the privilege to read. So the operator grants journal access once, out of band
 # (policy/apparmor/install prints the step), and this stays unprivileged. When the
 # grant is absent the run still happens and RECORDS that it was blind, the way
-# QUAR-001 warns rather than refusing -- Ironveil cannot fix a host-wide condition
+# QUAR-001 warns rather than refusing -- Diodine cannot fix a host-wide condition
 # and refusing every run on an unprovisioned host would not make it any safer.
 # tests/run-checks is what refuses to be blind.
 DENIAL_ANCHOR=none
@@ -254,8 +254,8 @@ record_denials() {
                       "$DENIAL_ANCHOR" "$(printf '%s' "$DENIALS_WHY" | json_str)")
     else
         # Match both markers. profile= is a prefix test because a child profile
-        # appears as ironveil-qemu//something.
-        raw=$(denial_window | grep 'apparmor="DENIED"' | grep 'profile="ironveil-qemu' || true)
+        # appears as diodine-qemu//something.
+        raw=$(denial_window | grep 'apparmor="DENIED"' | grep 'profile="diodine-qemu' || true)
         n=$(printf '%s' "$raw" | grep -c . || true)
         if suppression_window | grep -qE 'Suppressed [0-9]+ messages'; then
             supp=true
@@ -314,13 +314,13 @@ if [ "$TIMEOUT" -gt 3600 ]; then
 fi
 
 # -------------------------------------------------------------- run scaffold --
-RUNBASE="${XDG_RUNTIME_DIR:-/tmp}/ironveil"
+RUNBASE="${XDG_RUNTIME_DIR:-/tmp}/diodine"
 mkdir -p "$RUNBASE"; chmod 0700 "$RUNBASE"
 RUNDIR="$(mktemp -d "$RUNBASE/r.XXXXXX")"
 
 # OUT-001. QEMU's pipe chardev uses a FIFO pair: it WRITES guest output to
 # <path>.out and READS host input from <path>.in. Both must exist for QEMU to
-# start, but nothing in Ironveil ever opens .in for writing -- so the inbound
+# start, but nothing in Diodine ever opens .in for writing -- so the inbound
 # FIFO has no writer and the guest's reads on it see EOF forever. The
 # directionality is a property of which descriptors exist, not of anyone's
 # good behaviour, and it survives a compromised receiver.
@@ -353,11 +353,11 @@ trap cleanup EXIT INT TERM
 # second cpio archive concatenated onto it -- the kernel unpacks concatenated
 # archives in order, so later entries win.
 OVERLAY="$RUNDIR/overlay"
-mkdir -p "$OVERLAY/ironveil/payload" "$OVERLAY/ironveil/sample"
+mkdir -p "$OVERLAY/diodine/payload" "$OVERLAY/diodine/sample"
 
 if [ -n "$PAYLOAD" ]; then
     [ -r "$PAYLOAD" ] || die "payload not readable: $PAYLOAD"
-    install -m 0755 "$PAYLOAD" "$OVERLAY/ironveil/payload/run"
+    install -m 0755 "$PAYLOAD" "$OVERLAY/diodine/payload/run"
     say "payload: $PAYLOAD"
 else
     say "payload: built-in environment probe"
@@ -365,8 +365,8 @@ fi
 
 if [ -n "$SAMPLE" ]; then
     [ -r "$SAMPLE" ] || die "sample not readable: $SAMPLE"
-    install -m 0444 "$SAMPLE" "$OVERLAY/ironveil/sample/$(basename "$SAMPLE")"
-    say "sample: $SAMPLE -> /ironveil/sample/$(basename "$SAMPLE")"
+    install -m 0444 "$SAMPLE" "$OVERLAY/diodine/sample/$(basename "$SAMPLE")"
+    say "sample: $SAMPLE -> /diodine/sample/$(basename "$SAMPLE")"
 fi
 
 ( cd "$OVERLAY" && find . -print0 | sort -z \
@@ -389,7 +389,7 @@ HOST_AA=$(apparmor_parser --version 2>/dev/null | sed -n '1s/.*version //p')
 
 # ------------------------------------------------------------------ receiver --
 say "starting receiver (quarantine: quarantine/$RUN_ID)"
-"$HERE/ironveil-receiver" \
+"$HERE/diodine-receiver" \
     --fifo "$PIPE.out" --outdir "$QUARANTINE" \
     --max-total "$MAX_TOTAL" --max-artifact "$MAX_ARTIFACT" \
     --max-files "$MAX_FILES" --timeout "$TIMEOUT" &
@@ -406,7 +406,7 @@ done
 # ---------------------------------------------------------------- qemu args --
 # Everything the guest can see is on this list. Nothing is implicit.
 ARGS=(
-    -name "ironveil-$RUN_ID"
+    -name "diodine-$RUN_ID"
     -no-user-config                 # ignore system-wide qemu config
     -nodefaults                     # attach NOTHING we do not name below
     -machine q35,accel=kvm
@@ -432,12 +432,12 @@ ARGS=(
     # device at all, so FS-003 holds by construction.
     -kernel "$BASE/vmlinuz"
     -initrd "$RUNDIR/initrd"
-    -append "console=ttyS0 quiet panic=1 ironveil.payload_timeout=$PAYLOAD_TIMEOUT"
+    -append "console=ttyS0 quiet panic=1 diodine.payload_timeout=$PAYLOAD_TIMEOUT"
 
     # The output channel. One port, one direction by policy at the far end.
     -device virtio-serial-pci,id=vser0,max_ports=2
     -chardev "pipe,id=ivout,path=$PIPE"
-    -device virtserialport,chardev=ivout,bus=vser0.0,name=org.ironveil.out
+    -device virtserialport,chardev=ivout,bus=vser0.0,name=org.diodine.out
 
     # Guest console -> a host log file. Read-only to the guest's benefit; the
     # guest cannot read this file back.
@@ -459,8 +459,8 @@ fi
 # place that can refuse before anything has a side effect. All that is left here
 # is to act on it.
 if [ "$APPARMOR_CONFINE" -eq 1 ]; then
-    LAUNCH=(aa-exec -p ironveil-qemu -- qemu-system-x86_64)
-    say "AppArmor: confining under ironveil-qemu (VMM-002)"
+    LAUNCH=(aa-exec -p diodine-qemu -- qemu-system-x86_64)
+    say "AppArmor: confining under diodine-qemu (VMM-002)"
 else
     LAUNCH=(qemu-system-x86_64)
     say "AppArmor: profile not loaded; proceeding UNCONFINED per --allow-unconfined"
@@ -471,7 +471,7 @@ fi
 # A run must be able to say which claims were actually live while it happened.
 # Every value here is READ BACK from the live VMM process and its cgroup rather
 # than echoed from this script's intent: for eight runs the launcher correctly
-# reported "confining under ironveil-qemu" while the profile denied qemu's NUMA
+# reported "confining under diodine-qemu" while the profile denied qemu's NUMA
 # probe on every one of them, and nothing on disk recorded either fact. An
 # unconfined run that believed it was confined is precisely what this record
 # exists to make visible.
@@ -484,7 +484,7 @@ record_launch_state() {
 
     for i in $(seq 400); do
         scope=$(find "/sys/fs/cgroup/user.slice/user-$(id -u).slice" \
-                     -maxdepth 4 -type d -name "ironveil-$RUN_ID.scope" \
+                     -maxdepth 4 -type d -name "diodine-$RUN_ID.scope" \
                      2>/dev/null | head -1)
         if [ -n "$scope" ]; then
             for p in $(cat "$scope/cgroup.procs" 2>/dev/null); do
@@ -527,7 +527,7 @@ record_launch_state() {
     fi
 
     local confined=false
-    case "$profile" in ironveil-qemu*) confined=true ;; esac
+    case "$profile" in diodine-qemu*) confined=true ;; esac
 
     local cg_mem="not observed" cg_swap="not observed" cg_cpu="not observed"
     local cg_pids="not observed" cg_io="not observed"
@@ -605,7 +605,7 @@ record_launch_state() {
 # guest RAM off host swap, which matters for disposal hygiene as much as for
 # resource safety.
 SCOPE=(systemd-run --user --scope --quiet
-       --unit "ironveil-$RUN_ID"
+       --unit "diodine-$RUN_ID"
        -p MemoryMax="${MEM_MB}M"
        -p MemorySwapMax=0
        -p CPUQuota="${CPU_QUOTA}%"

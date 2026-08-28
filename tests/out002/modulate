@@ -31,7 +31,7 @@ def find_reader(timeout_s):
     """Find the process that actually holds an iv.out FIFO open for reading.
 
     Identify it by its open file descriptors, not by its command line. Matching
-    on cmdline found the pyenv shim -- `bash pyenv-exec python3 .../ironveil-
+    on cmdline found the pyenv shim -- `bash pyenv-exec python3 .../diodine-
     receiver` -- whose argv contains the receiver's path while the process doing
     the reading is its child. SIGSTOP on the wrapper stops nothing, the reader
     keeps draining, and every measurement built on it silently describes an
@@ -59,7 +59,7 @@ def find_reader(timeout_s):
                     target = os.readlink(f"{fddir}/{fd}")
                 except OSError:
                     continue
-                if target.endswith("/iv.out") and "/ironveil/" in target:
+                if target.endswith("/iv.out") and "/diodine/" in target:
                     return pid
         time.sleep(0.05)
     return None

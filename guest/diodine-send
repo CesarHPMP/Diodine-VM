@@ -1,5 +1,5 @@
 #!/bin/sh
-# ironveil-send -- guest-side artifact emitter.
+# diodine-send -- guest-side artifact emitter.
 #
 # Writes length-prefixed frames to the virtio-serial output port. This is the
 # ONLY sanctioned way for anything in the analysis VM to move bytes across the
@@ -12,18 +12,18 @@
 # receiver. The receiver is the authority on every limit.
 #
 # Frame (big-endian, no padding):
-#     "IVF1" | uint16 name_len | uint64 size | name | payload
+#     "DVF1" | uint16 name_len | uint64 size | name | payload
 #
 # Usage:
-#     ironveil-send FILE [FILE...]
-#     ironveil-send -n NAME -    # read payload from stdin, send under NAME
+#     diodine-send FILE [FILE...]
+#     diodine-send -n NAME -    # read payload from stdin, send under NAME
 #
 set -eu
 
-PORT="${IRONVEIL_PORT:-/dev/virtio-ports/org.ironveil.out}"
-MAGIC='IVF1'
+PORT="${DIODINE_PORT:-/dev/virtio-ports/org.diodine.out}"
+MAGIC='DVF1'
 
-die() { echo "ironveil-send: $*" >&2; exit 1; }
+die() { echo "diodine-send: $*" >&2; exit 1; }
 
 # Emit $1 as $2 big-endian bytes, using printf %b so the octal escapes are
 # interpreted without the value ever being treated as a format string.
@@ -66,7 +66,7 @@ send_frame() {
 exec 3>"$PORT"
 
 if [ "${1:-}" = "-n" ]; then
-    [ $# -ge 3 ] || die "usage: ironveil-send -n NAME -"
+    [ $# -ge 3 ] || die "usage: diodine-send -n NAME -"
     name=$2
     [ "$3" = "-" ] || die "with -n the source must be '-' (stdin)"
     tmp=$(mktemp)
@@ -74,11 +74,11 @@ if [ "${1:-}" = "-n" ]; then
     cat > "$tmp"
     size=$(wc -c < "$tmp" | tr -d ' ')
     send_frame "$name" "$size" < "$tmp" >&3
-    echo "ironveil-send: sent $name ($size bytes)" >&2
+    echo "diodine-send: sent $name ($size bytes)" >&2
     exit 0
 fi
 
-[ $# -ge 1 ] || die "usage: ironveil-send FILE [FILE...]"
+[ $# -ge 1 ] || die "usage: diodine-send FILE [FILE...]"
 
 for f in "$@"; do
     [ -f "$f" ] || die "not a regular file: $f"
@@ -86,7 +86,7 @@ for f in "$@"; do
     name=$(basename "$f")
     size=$(wc -c < "$f" | tr -d ' ')
     send_frame "$name" "$size" < "$f" >&3
-    echo "ironveil-send: sent $name ($size bytes)" >&2
+    echo "diodine-send: sent $name ($size bytes)" >&2
 done
 
 exec 3>&-

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Ironveil Phase 2 adversarial suite.
+# Diodine VM Phase 2 adversarial suite.
 #
 # tests/run-checks says of itself that it is NOT this: its payloads are
 # cooperative probes confirming the boundary is configured as claimed. This is
@@ -29,7 +29,7 @@ cd "$ROOT"
 SUITES=(frames ingest)
 RAN=0; FAILED=0
 
-printf '\033[1mIronveil adversarial suite\033[0m\n'
+printf '\033[1mDiodine VM adversarial suite\033[0m\n'
 
 for s in "${SUITES[@]}"; do
     printf '\n\033[1m=== %s ===\033[0m\n' "$s"
