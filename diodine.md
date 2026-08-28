@@ -389,16 +389,9 @@ Useful for malicious documents, hostile browser content, malware samples, booby-
 
 ## Hardened Outer Environment: Compartmentalization, Not Amnesia
 
-The original sketch called for a "Tails-like" outer environment. This conflated two different properties and should be corrected.
+Diodine needs **compartmentalization** — trust domains that cannot reach each other, the property Qubes is built around. It does not need amnesia, which would fight the requirement directly: the entire point of the output channel is to *retain analysis artifacts*.
 
-- **Amnesia** (Tails) means nothing persists. It is designed for anonymity under coercion, on hardware the user may not control.
-- **Compartmentalization** (Qubes) means different trust domains cannot reach each other. It is designed for containing compromise.
-
-Diodine needs **compartmentalization**. It does not need amnesia — and amnesia actively fights the requirement, since the entire point of the output channel is to *retain analysis artifacts*.
-
-Tails is additionally a poor host for this work in practice: it is not built to be a hypervisor host, has no persistent storage by design, and running VMs inside it is discouraged upstream. Using it here would be adopting a property that is not wanted while giving up the tooling that is.
-
-The layered model is still correct, with the first layer relabeled:
+The layered model:
 
 ```text
 Compartmentalized / hardened host environment
