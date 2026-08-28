@@ -387,9 +387,9 @@ Useful for malicious documents, hostile browser content, malware samples, booby-
 - Guest RAM state, swap, and the VMM's mapped memory are also artifacts — ensure they do not persist to host disk (avoid swapping the VMM; consider locked memory or an encrypted swap the host discards).
 - Treat the base image itself as an asset to verify by hash before each run.
 
-## Hardened Outer Environment: Compartmentalization, Not Amnesia
+## Hardened Outer Environment
 
-Diodine needs **compartmentalization** — trust domains that cannot reach each other, the property Qubes is built around. It does not need amnesia, which would fight the requirement directly: the entire point of the output channel is to *retain analysis artifacts*.
+Diodine needs **compartmentalization** — trust domains that cannot reach each other, the property Qubes is built around.
 
 The layered model:
 
