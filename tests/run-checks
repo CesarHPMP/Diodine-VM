@@ -583,6 +583,44 @@ else
     bad "AUD-003" "an orphan check id went unreported"
 fi
 
+# ================================================= VMM diagnostics (OUT-004)
+head_ "N. VMM diagnostics are recorded (OUT-004)"
+# QEMU inherited this launcher's stdout and stderr until tests/enumerate-paths
+# listed its descriptors and nobody could say where fd 1 and 2 pointed. They
+# pointed at the operator's terminal, and nothing on disk held a byte of it.
+
+if [ -f "$PROBE/vmm.log" ]; then
+    ok "OUT-004" "every run leaves a vmm.log in its run record"
+else
+    bad "OUT-004" "no vmm.log: the VMM's diagnostics are going somewhere unrecorded"
+fi
+
+# Driven. A capture that has never captured anything is not evidence, and a clean
+# run often produces an EMPTY vmm.log -- which is exactly the case where "it
+# works" and "it silently writes nothing" look identical. So make a stub VMM emit
+# a known marker and require it to land in the file. Stub on PATH, no test hook
+# in the product, the same shape as VMM-002's fail-closed stub above.
+VSTUB="$TMP/vmmstub"; mkdir -p "$VSTUB"
+MARKER="diagnostic-marker-$$"
+printf '#!/bin/sh\necho "%s" >&2\nexit 0\n' "$MARKER" > "$VSTUB/qemu-system-x86_64"
+chmod +x "$VSTUB/qemu-system-x86_64"
+PATH="$VSTUB:$PATH" ./bin/diodine-run --allow-unconfined --timeout 20 \
+    > "$TMP/vmmstub.log" 2>&1
+VDIR=$(ls -td quarantine/*/ 2>/dev/null | head -1)
+if [ -r "$VDIR/vmm.log" ] && grep -q "$MARKER" "$VDIR/vmm.log"; then
+    ok "OUT-004" "VMM stderr is captured into the run record (driven)"
+else
+    bad "OUT-004" "a VMM writing to stderr left nothing in vmm.log; capture does not work"
+fi
+# And it must NOT have gone to the terminal instead, which is the behaviour being
+# replaced. The launcher echoes the file back only on a nonzero exit; this stub
+# exits 0, so the marker must be absent from the launcher's own output.
+if grep -q "$MARKER" "$TMP/vmmstub.log"; then
+    bad "OUT-004" "VMM stderr still reached the launcher's output on a clean exit"
+else
+    ok "OUT-004" "VMM stderr does not leak to the operator's stream on a clean exit"
+fi
+
 # ============================================ MAC denial visibility (AUD-004)
 head_ "M. MAC denial visibility (AUD-004)"
 # The NUMA denial fired on every confined run while 26/26 checks passed twice.

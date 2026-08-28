@@ -275,12 +275,27 @@ boundary holds. Concretely, all of these before any real sample:
 - **Q7, measured reverse bandwidth** — answered, with caveats (W4).
 - **Q9, output storage exhaustion** — partly: per-run caps hold, cross-run is
   `RES-008`, and console is `RES-007`.
-- **Q3/Q4, all paths guest→host and host→guest** — improved but not closed. Two
-  paths turned up late that nobody had enumerated: the console file and the
-  artifact *namespace*. Both were found by accident rather than by an exhaustive
-  enumeration, which suggests the enumeration is still incomplete. Redo it
-  deliberately: every file descriptor, every shared namespace, every host process
-  that touches guest-authored bytes.
+- **Q3/Q4, all paths guest→host and host→guest** — **done**, and it found one.
+  `tests/enumerate-paths` lists every VMM file descriptor, every file-backed
+  mapping, every namespace, and every host process holding a descriptor under the
+  run or quarantine directory, and classifies each by direction and statement.
+  Anything unmatched is a failure, so the enumeration is a tripwire rather than a
+  document that goes stale.
+
+  It found `OUT-004`: QEMU inherited the launcher's stdout and stderr, so its
+  diagnostics went to the operator's terminal and nothing on disk recorded them —
+  the same defect `VMM-002`'s comment describes having already been fixed once for
+  the launcher's own messages. Now captured to `vmm.log` in the run record.
+
+  It also made two things explicit that were true but unwritten: the VMM shares
+  **all** the host's namespaces (isolation is KVM + AppArmor + cgroup, not
+  namespaces), and the kernel and initramfs are not held as descriptors at all —
+  QEMU reads them at startup and closes them, so the boot image appears as a
+  read-only mapping instead.
+
+  Three earlier paths were found by accident: the console file, the artifact
+  namespace (`AUD-002`), and the ingest expansion namespace (`ING-003`). This is
+  the fourth, and the first found on purpose.
 
 The rest stand as written.
 

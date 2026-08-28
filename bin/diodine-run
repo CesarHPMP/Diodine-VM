@@ -621,8 +621,19 @@ capture_denial_anchor
 record_launch_state "$QUARANTINE/RUN.json" &
 PROBE_PID=$!
 
+# OUT-004. QEMU used to inherit this script's stdout and stderr, so its
+# diagnostics went to whatever the operator's shell was and nothing on disk
+# recorded them -- the same defect VMM-002's comment describes having already
+# been fixed once for the launcher's OWN messages. Found by
+# tests/enumerate-paths, which is the point of that tool.
+#
+# Not piped into tee: piping the launch would make QRC the exit status of the
+# LAST command in the pipeline rather than the VMM's, and every decision below
+# reads QRC. The operator gets the content back explicitly instead, further down.
+VMMLOG="$QUARANTINE/vmm.log"
 set +e
-timeout --kill-after=10s "$TIMEOUT" "${SCOPE[@]}" "${LAUNCH[@]}" "${ARGS[@]}"
+timeout --kill-after=10s "$TIMEOUT" "${SCOPE[@]}" "${LAUNCH[@]}" "${ARGS[@]}" \
+        > "$VMMLOG" 2>&1
 QRC=$?
 set -e
 QEMU_PID=""
@@ -633,6 +644,17 @@ case $QRC in
     137) say "guest killed (SIGKILL)" ;;
     *)   say "qemu exited $QRC" ;;
 esac
+
+# Recording is not the same as showing. A failed launch has to reach the operator
+# now -- redirecting it to a file they have not been told about would recreate the
+# exact invisibility this change exists to remove, one layer down.
+if [ -s "$VMMLOG" ]; then
+    say "VMM diagnostics: $(wc -c < "$VMMLOG") bytes recorded in vmm.log (OUT-004)"
+    if [ "$QRC" -ne 0 ]; then
+        head -n 20 "$VMMLOG" | sed 's/^/  | /' >&2
+    fi
+fi
+chmod 0400 "$VMMLOG" 2>/dev/null || true
 
 # A nonzero receiver exit is a normal, meaningful outcome -- an enforced cap
 # is a success, not a launcher failure -- so it must not trip `set -e` and

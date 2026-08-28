@@ -164,6 +164,42 @@ policy:
     verify: code audit; receiver imports no archive or media library
     status: enforced
 
+  - id: OUT-004
+    claim: The VMM's own diagnostics are captured into the run record rather than
+           left to the operator's terminal, and are treated as a guest-influenced
+           byte path.
+    enforced_by: ironveil-run redirects the VMM's stdout and stderr to vmm.log in
+                 the run's quarantine directory, written host-side outside the
+                 artifacts/ namespace a guest can name, and printed back to the
+                 operator when the VMM exits nonzero
+    verify: every run leaves a vmm.log; a stub VMM writing a known marker to
+            stderr has that marker land in vmm.log rather than on the terminal;
+            a payload emitting an artifact called vmm.log does not disturb it
+    status: enforced
+    note: |
+      Found by tests/enumerate-paths, not by reading the code. QEMU inherited the
+      launcher's stdout and stderr, so its descriptors 1 and 2 pointed at whatever
+      the operator's shell happened to be -- a terminal, or a redirect. Nothing on
+      disk recorded a single byte of it.
+
+      That is the same defect VMM-002's own comment describes having already been
+      fixed once: "the warning went to stdout, scrolled past, and nothing on disk
+      recorded that a run had no MAC confinement -- which is how eight consecutive
+      runs went unconfined here without anyone noticing." The launcher's messages
+      were fixed then. The VMM's were not, and nobody noticed because nobody had
+      enumerated the descriptors.
+
+      Not a containment failure. QEMU's diagnostics are QEMU's, not the guest's,
+      and no artifact bytes travel this way. It is classified guest-INFLUENCED
+      rather than guest-authored: a guest can provoke device warnings and error
+      messages, so what appears here is partly under its control, and an analyst
+      reading only quarantine/ was previously missing that entire stream.
+
+      Unbounded, like RES-007's console and for a weaker version of the same
+      reason: QEMU emits diagnostics at its own pace, not the guest's, and no
+      plausible guest turns that into a disk-exhaustion path. Recorded here rather
+      than capped.
+
   - id: RES-001
     claim: Guest memory is capped and never reaches host swap.
     enforced_by: systemd-run --user --scope -p MemoryMax -p MemorySwapMax=0

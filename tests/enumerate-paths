@@ -1,0 +1,280 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 César Henrique Policarpo de Melo
+"""Enumerate every path across the guest/host boundary, and fail on a new one.
+
+Why this exists. Three boundary-crossing paths in this project were found by
+ACCIDENT rather than by enumeration: the console file (RES-007), the artifact
+namespace (AUD-002), and the ingest expansion namespace (ING-003). Each was found
+while looking for something else. NEXT.md's research questions Q3/Q4 say the
+enumeration is therefore incomplete and should be redone deliberately -- and the
+useful form of "deliberately" is not a document, which goes stale silently, but a
+check that FAILS when a path appears that nobody has classified.
+
+So this is an enumeration with a tripwire. Every file descriptor the VMM holds,
+every writable file-backed mapping, and every host process holding a descriptor
+under the run or quarantine directory is listed and matched against EXPECTED
+below. Anything unmatched is a finding, not a warning.
+
+Method notes, each of which cost something to learn:
+
+  * The VMM is found by CGROUP MEMBERSHIP, never by name. `comm` truncates at 15
+    characters, so "qemu-system-x86_64" is stored as "qemu-system-x86" and
+    `pgrep -x qemu-system-x86_64` silently matches nothing. Matching on the
+    command line is worse: it also matches whatever process is doing the
+    searching, whose own arguments contain the pattern.
+
+  * Reading /proc/<pid>/fd needs ptrace-level access, which checks the caller's
+    GID as well as its UID. Running the VM under `sg <group>` gives it a
+    different primary group and every readlink fails with EPERM even as the same
+    user -- an instrument that silently reports "no descriptors" rather than
+    "cannot look". This tool distinguishes the two and says which.
+
+  * The kernel and initramfs do NOT appear as descriptors: QEMU reads them at
+    startup and closes them. The initrd shows up as a read-only MAPPING instead,
+    which is why mappings are enumerated separately and not folded into the fd
+    list.
+"""
+
+import os
+import re
+import sys
+
+# Every descriptor the VMM is expected to hold, as (regex, direction, statement,
+# what it is). Direction is the whole point of the table: it is what makes a new
+# entry reviewable rather than merely noted.
+EXPECTED = [
+    (r"^/dev/null$",                    "inert",       "-",        "stdin"),
+    (r"^/dev/kvm$",                     "hypervisor",  "VMM-001",  "KVM control device"),
+    (r"^anon_inode:kvm-vm$",            "hypervisor",  "VMM-001",  "VM handle"),
+    (r"^anon_inode:kvm-vcpu:\d+$",      "hypervisor",  "VMM-001",  "vCPU handle"),
+    (r"^anon_inode:kvm-vcpu-stats:\d+$","hypervisor",  "VMM-001",  "vCPU stats handle"),
+    (r"^anon_inode:\[eventfd\]$",       "internal",    "-",        "QEMU internal eventfd"),
+    (r"^anon_inode:\[signalfd\]$",      "internal",    "-",        "QEMU internal signalfd"),
+    (r"/iv\.in$",                       "host->guest", "OUT-001",  "inbound FIFO; created, never opened for writing by anything"),
+    (r"/iv\.out$",                      "guest->host", "OUT-001",  "outbound FIFO; the only artifact path"),
+    (r"/console\.log$",                 "guest->host", "RES-007",  "console straight to a host file, outside the export caps"),
+]
+
+# stdout/stderr are inherited from the launcher and therefore land wherever the
+# operator sent them. They carry QEMU's own diagnostics, not guest artifacts, but
+# a guest CAN influence what QEMU prints, so they are classified rather than
+# ignored.
+INHERITED_STDIO = "guest-influenced"
+
+EXPECTED_MAPS = [
+    (r"/initrd$",  "host->guest", "FS-003", "boot image: kernel+initramfs+per-run overlay, mapped read-only"),
+]
+
+
+def find_vmm():
+    """The VMM pid, by cgroup membership. Returns (pid, note)."""
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/cgroup") as fh:
+                if "diodine-" not in fh.read():
+                    continue
+            with open(f"/proc/{entry}/cmdline", "rb") as fh:
+                if b"qemu-system" not in fh.read():
+                    continue
+        except OSError:
+            continue
+        return entry, ""
+    return None, "no VMM found in a diodine- cgroup"
+
+
+def creds(pid):
+    uid = gid = None
+    try:
+        for line in open(f"/proc/{pid}/status"):
+            if line.startswith("Uid:"): uid = line.split()[1]
+            if line.startswith("Gid:"): gid = line.split()[1]
+    except OSError:
+        pass
+    return uid, gid
+
+
+def fds(pid):
+    """(fd, target) pairs. Raises PermissionError rather than returning nothing:
+    'cannot look' and 'nothing there' must never read alike."""
+    out, denied = [], 0
+    try:
+        names = os.listdir(f"/proc/{pid}/fd")
+    except PermissionError:
+        raise
+    for n in sorted(names, key=lambda x: int(x) if x.isdigit() else 0):
+        try:
+            out.append((n, os.readlink(f"/proc/{pid}/fd/{n}")))
+        except PermissionError:
+            denied += 1
+        except OSError:
+            pass
+    if denied and not out:
+        raise PermissionError(f"all {denied} descriptors unreadable")
+    return out, denied
+
+
+def classify(target, stdio_fds, fd):
+    if fd in ("1", "2") and target not in ("/dev/null",):
+        return INHERITED_STDIO, "-", "inherited launcher stdout/stderr (QEMU diagnostics)"
+    for pat, direction, stmt, what in EXPECTED:
+        if re.search(pat, target):
+            return direction, stmt, what
+    return None, None, None
+
+
+def holders(paths):
+    """Every process holding a descriptor under any of `paths`."""
+    found, unreadable = [], 0
+    me = os.getuid()
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            if os.stat(f"/proc/{entry}").st_uid != me:
+                continue
+        except OSError:
+            continue
+        try:
+            names = os.listdir(f"/proc/{entry}/fd")
+        except PermissionError:
+            unreadable += 1
+            continue
+        except OSError:
+            continue
+        try:
+            comm = open(f"/proc/{entry}/comm").read().strip()
+        except OSError:
+            comm = "?"
+        for n in names:
+            try:
+                t = os.readlink(f"/proc/{entry}/fd/{n}")
+            except OSError:
+                continue
+            if any(t.startswith(p.rstrip("/") + "/") for p in paths):
+                found.append((entry, comm, n, t))
+    return found, unreadable
+
+
+def main():
+    pid, note = find_vmm()
+    if not pid:
+        print(f"\033[31mno running VM found\033[0m: {note}", file=sys.stderr)
+        print("start one first, e.g.:", file=sys.stderr)
+        print("  ./bin/diodine-run --payload tests/payloads/spin.sh --timeout 300 &",
+              file=sys.stderr)
+        return 2
+
+    uid, gid = creds(pid)
+    print(f"\033[1mDiodine VM boundary path enumeration\033[0m")
+    print(f"VMM pid {pid}  uid={uid} gid={gid}  (this process uid={os.getuid()} gid={os.getgid()})")
+
+    try:
+        fdlist, denied = fds(pid)
+    except PermissionError as e:
+        print(f"\n\033[31mCANNOT ENUMERATE\033[0m: {e}", file=sys.stderr)
+        if gid and gid != str(os.getgid()):
+            print(f"  The VMM's gid ({gid}) differs from this process's ({os.getgid()}).",
+                  file=sys.stderr)
+            print("  ptrace_may_access checks GID as well as UID, so every readlink",
+                  file=sys.stderr)
+            print("  fails. Run the VM and this tool with the same primary group.",
+                  file=sys.stderr)
+        print("  Reporting this rather than an empty descriptor list is deliberate:",
+              file=sys.stderr)
+        print("  'cannot look' and 'nothing there' must not read alike.", file=sys.stderr)
+        return 2
+
+    findings = 0
+    print(f"\n\033[1mA. VMM file descriptors ({len(fdlist)})\033[0m")
+    rundir = qdir = None
+    for fd, target in fdlist:
+        if target.endswith("/iv.out"):
+            rundir = os.path.dirname(target)
+        if target.endswith("/console.log"):
+            qdir = os.path.dirname(target)
+        direction, stmt, what = classify(target, fdlist, fd)
+        if direction is None:
+            print(f"  \033[31mUNENUMERATED\033[0m fd {fd} -> {target}")
+            print(f"       no entry in EXPECTED. Classify it and add the statement it "
+                  f"falls under before this passes again.")
+            findings += 1
+        else:
+            colour = "33" if direction in ("guest->host", "guest-influenced") else "32"
+            print(f"  \033[{colour}m{direction:<16}\033[0m {stmt:<8} fd {fd:<3} {target}")
+            print(f"       {what}")
+    if denied:
+        print(f"  \033[31m{denied} descriptor(s) unreadable\033[0m -- enumeration incomplete")
+        findings += 1
+
+    print(f"\n\033[1mB. File-backed mappings\033[0m")
+    seen_map = False
+    try:
+        for line in open(f"/proc/{pid}/maps"):
+            parts = line.split()
+            if len(parts) < 6:
+                continue
+            path = parts[5]
+            if not path.startswith("/") or re.search(r"\.so|/usr/|/lib|locale|fonts|gconv", path):
+                continue
+            seen_map = True
+            hit = next((e for e in EXPECTED_MAPS if re.search(e[0], path)), None)
+            if hit:
+                print(f"  \033[32m{hit[1]:<16}\033[0m {hit[2]:<8} {parts[1]} {path}")
+                print(f"       {hit[3]}")
+            else:
+                print(f"  \033[31mUNENUMERATED\033[0m mapping {parts[1]} {path}")
+                findings += 1
+    except OSError as e:
+        print(f"  could not read maps: {e}")
+    if not seen_map:
+        print("  \033[31mno file-backed mappings seen\033[0m -- the boot image should appear here")
+        findings += 1
+
+    print(f"\n\033[1mC. Namespaces\033[0m")
+    for ns in ("mnt", "net", "ipc", "pid", "uts", "user", "cgroup", "time"):
+        try:
+            q = os.readlink(f"/proc/{pid}/ns/{ns}")
+            h = os.readlink(f"/proc/self/ns/{ns}")
+        except OSError:
+            print(f"  {ns:<7} unreadable"); continue
+        state = "SHARED with host" if q == h else "separate"
+        print(f"  {ns:<7} {state}")
+    print("       Isolation here is KVM + AppArmor + cgroup, NOT namespaces. The VMM")
+    print("       runs in the host's namespaces by design; the guest is confined by")
+    print("       virtualisation, and the VMM by MAC. Recorded so that stays explicit.")
+
+    print(f"\n\033[1mD. Host processes holding guest-authored bytes\033[0m")
+    paths = [p for p in (rundir, qdir) if p]
+    if not paths:
+        print("  \033[31mneither the run directory nor the quarantine directory was "
+              "identified\033[0m")
+        findings += 1
+    else:
+        for p in paths:
+            print(f"  scanning {p}")
+        found, unreadable = holders(paths)
+        for procpid, comm, fd, target in sorted(found):
+            tag = "VMM" if procpid == pid else "host consumer"
+            print(f"  {tag:<14} pid {procpid:<8} {comm:<18} fd {fd:<3} {target}")
+        if unreadable:
+            print(f"  ({unreadable} of this user's processes had unreadable fd tables)")
+        # Lower bound: the VMM itself holds at least iv.out and console.log, so a
+        # scan finding nothing has failed rather than proved the directory private.
+        if len(found) < 2:
+            print(f"  \033[31mfound only {len(found)} holder(s)\033[0m -- the VMM alone "
+                  f"holds at least two; this scan did not work")
+            findings += 1
+
+    print("\n" + "-" * 60)
+    if findings:
+        print(f"\033[31m{findings} finding(s): a path is unenumerated or a scan failed\033[0m")
+        return 1
+    print("\033[1mevery boundary-crossing path is enumerated and classified\033[0m")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
