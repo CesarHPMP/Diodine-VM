@@ -31,7 +31,7 @@ mapfile -t SH_FILES < <(git ls-files | while read -r f; do
     head -1 "$f" 2>/dev/null | grep -q '^#!.*\(bash\|sh\)$' && echo "$f"; done)
 mapfile -t PY_FILES < <(git ls-files | while read -r f; do
     head -1 "$f" 2>/dev/null | grep -q '^#!.*python3$' && echo "$f"; done)
-mapfile -t SRC_FILES < <(git ls-files | grep -vE '\.md$|^LICENSE$|^\.gitignore$|^\.github/')
+mapfile -t SRC_FILES < <(git ls-files | grep -vE '\.md$|^LICENSE$|^\.gitignore$')
 
 head_ "A. Lower bounds on this harness itself"
 if [ "${#SH_FILES[@]}" -ge 10 ]; then
@@ -86,20 +86,35 @@ else
 fi
 
 head_ "D. Licence notices (GPL-3.0-or-later)"
-MISSING=""
+# Read the notice from the file HEADER only, never from the whole file. Scanning
+# whole files made this harness match its OWN grep pattern the moment it was
+# committed and entered git ls-files: the literal identifier regex in its source
+# was extracted as though it were a licence tag, and CI failed with
+# "inconsistent licence identifiers: SPDX-License-Identifier: [^". That is the
+# same defect as Phase 1's pgrep -f matching the shell doing the searching, and
+# the same one run-checks' AUD-003 already sidesteps by assembling its fabricated
+# ids from variables so the literals never appear in the harness it reads.
+#
+# Header-scoping is also the stricter claim: a licence notice belongs at the top
+# of a file, not merely somewhere inside it.
+spdx_of() { head -5 "$1" | grep -oE 'SPDX-License-Identifier:[[:space:]]*[A-Za-z0-9.+-]+' \
+                         | head -1 | sed 's/.*:[[:space:]]*//'; }
+
+MISSING=""; WRONG=""
 for f in "${SRC_FILES[@]}"; do
-    grep -q 'SPDX-License-Identifier' "$f" || MISSING="$MISSING $f"
+    id=$(spdx_of "$f")
+    if [ -z "$id" ]; then MISSING="$MISSING $f"
+    elif [ "$id" != "GPL-3.0-or-later" ]; then WRONG="$WRONG $f($id)"; fi
 done
 if [ -z "$MISSING" ]; then
-    ok "LICENSE" "all ${#SRC_FILES[@]} source files carry an SPDX identifier"
+    ok "LICENSE" "all ${#SRC_FILES[@]} source files carry an SPDX identifier in their header"
 else
     bad "LICENSE" "no SPDX identifier in:$MISSING"
 fi
-WRONG=$(grep -rhoE 'SPDX-License-Identifier: [^ ]+' "${SRC_FILES[@]}" | sort -u | grep -v 'GPL-3.0-or-later' || true)
 if [ -z "$WRONG" ]; then
     ok "LICENSE" "every identifier reads GPL-3.0-or-later"
 else
-    bad "LICENSE" "inconsistent licence identifiers: $(echo $WRONG | tr '\n' ' ')"
+    bad "LICENSE" "inconsistent licence identifiers:$WRONG"
 fi
 if [ -s LICENSE ] && head -2 LICENSE | grep -q 'GNU GENERAL PUBLIC LICENSE' \
    && grep -q 'Version 3, 29 June 2007' LICENSE; then
