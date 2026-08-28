@@ -9,7 +9,7 @@ and what has to be true before live samples are allowed anywhere near it.
 | workstream | status |
 | --- | --- |
 | **W1** denial visibility | **done** — `AUD-004`. Journal-anchored, unprivileged, availability decided by live read. The launcher records; `tests/run-checks` fails when blind. |
-| **W2** adversarial suite | **started** — `tests/adversarial/` (framing corpus, ingest corpus). Exhaustion and in-VM cases still to come. |
+| **W2** adversarial suite | **started** — `tests/adversarial/`, 61 cases against the receiver's framing and ingest. Found `ING-003`. Exhaustion and in-VM cases still to come. |
 | **W3** `RES-007` | **decided** — console stays uncapped; `policy.yaml` carries the reasoning, and it is no longer filed as a gap. |
 | W4 `OUT-002` deeper | deferred → `BACKLOG.md` |
 | W5 portability | deferred → `BACKLOG.md`. Host provenance now lands in `RUN.json` so existing numbers stay attributable. |
@@ -168,6 +168,29 @@ Specific targets suggested by Phase 1:
 
 Acceptance: every test names a statement; every test has been shown to fail
 against a deliberately weakened configuration.
+
+**Landed:** the framing corpus (43 cases, driving `ironveil-receiver` directly)
+and the ingest corpus (18 cases). Between them they cover the malformed-framing
+and ingest targets above. `AUD-003` now computes coverage against this suite too,
+so a statement checked only here is not reported as an uncovered gap.
+
+The suite found `ING-003` — nested archives sharing a basename expanded into one
+directory and commingled, at exit 0. Not an escape; an attribution failure, and
+the same class as `AUD-002`. Fixed structurally.
+
+It also confirmed the design rules were worth writing down. Two harness bugs and
+one useless check turned up *while building it*, all three of the Phase 1 shape:
+a stall case that closed the pipe and silently measured truncation instead; a
+partial `os.write` that sent 19 bytes fewer than claimed and did the same; and a
+namespace check that passed against the unfixed code because it tested only one
+of the two plausible directory namings.
+
+**Still to come:** exhaustion (every cap in `RES-001`..`RES-008`, from inside,
+and in combination), and the in-VM cases. Note the confound for anything driven
+through a guest: `guest/init` runs `ironveil-send` after the payload returns, so
+a malformed-frame test in a VM is always followed by a second, well-formed sender
+on the same stream. The framing corpus avoids it by driving the receiver
+directly; the exhaustion work cannot, and has to account for it.
 
 ### W3 — `RES-007`, and the trade-off it forces
 
