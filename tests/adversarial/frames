@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+"""Adversarial framing corpus against the real receiver (RES-006, OUT-003, AUD-002).
+
+The receiver's header path is the only thing in Ironveil that parses
+guest-controlled structure, and it is reachable WITHOUT a VM: ironveil-receiver
+--fifo accepts any FIFO. So this drives the real binary directly -- milliseconds
+per case instead of ~15s, which is what makes a corpus this size affordable.
+
+Two design rules, both from NEXT.md:
+
+  1. The corpus is split must-refuse / must-accept. The accept cases prove this
+     harness can pass; the refuse cases prove it can fail. Neither half is
+     trusted alone, and a harness that only ever saw healthy input would pass
+     vacuously forever.
+
+  2. Lower bound alongside upper bound. main() asserts a minimum case count, so
+     a corpus that silently built nothing cannot report success.
+
+Deliberately NOT run through a guest. guest/init always writes payload.rc and
+then runs ironveil-send after the payload returns, so every in-VM malformed-frame
+test is followed by a second, well-formed sender on the same stream. That is a
+real confound; here there is exactly one writer and it is this file.
+"""
+
+import os
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(HERE))
+RECEIVER = os.path.join(ROOT, "bin", "ironveil-receiver")
+
+MAGIC = b"IVF1"
+HEADER = struct.Struct(">4sHQ")
+
+# Small enough to keep cases fast; the receiver's logic is cap-relative.
+MAX_ARTIFACT = 4096
+MAX_TOTAL = 8192
+MAX_FILES = 3
+
+RC_OK, RC_VIOLATION, RC_NO_GUEST = 0, 3, 4
+
+
+def frame(name, payload, magic=MAGIC, name_len=None, size=None):
+    """A frame, with every field independently corruptible."""
+    nb = name if isinstance(name, bytes) else name.encode()
+    nl = len(nb) if name_len is None else name_len
+    sz = len(payload) if size is None else size
+    return HEADER.pack(magic, nl, sz) + nb + payload
+
+
+def valid(name, n=16):
+    return frame(name, b"A" * n)
+
+
+class Case:
+    def __init__(self, cid, stmt, data, expect_rc, expect_err=None,
+                 note=None, timeout=10, files=None, hold=False, caps=None):
+        self.cid, self.stmt, self.data = cid, stmt, data
+        self.expect_rc, self.expect_err = expect_rc, expect_err
+        self.note, self.timeout, self.files = note, timeout, files
+        # hold: keep the write end OPEN after writing. Closing it signals EOF,
+        # which the receiver correctly reads as truncation -- so a case meaning
+        # to test a STALL must not close, or it tests the wrong path. The first
+        # version of this file closed immediately and reported rc 3, quietly
+        # measuring truncation while claiming to measure a deadline.
+        self.hold = hold
+        # Per-case cap overrides. The 64 KiB chunk-boundary case needs a
+        # per-file cap above 64 KiB or the size check refuses it first and the
+        # case measures the cap it was not written to measure.
+        self.caps = caps or {}
+
+
+def run_case(c):
+    """Drive one case against a real receiver. Returns (ok, detail)."""
+    tmp = tempfile.mkdtemp(prefix="ivfuzz.")
+    fifo = os.path.join(tmp, "iv.out")
+    outdir = os.path.join(tmp, "q")
+    os.mkfifo(fifo, 0o600)
+    try:
+        proc = subprocess.Popen(
+            [RECEIVER, "--fifo", fifo, "--outdir", outdir,
+             "--max-total", str(c.caps.get("total", MAX_TOTAL)),
+             "--max-artifact", str(c.caps.get("artifact", MAX_ARTIFACT)),
+             "--max-files", str(c.caps.get("files", MAX_FILES)),
+             "--timeout", str(c.timeout)],
+            stderr=subprocess.PIPE, stdout=subprocess.DEVNULL)
+
+        # Opening for write releases the receiver's poll. Writing may block once
+        # the pipe fills if the receiver has already aborted, so tolerate EPIPE:
+        # a refusal mid-stream is the correct behaviour, not a harness error.
+        fd = None
+        try:
+            fd = os.open(fifo, os.O_WRONLY)
+            try:
+                # os.write on a pipe is a PARTIAL write -- capacity is 64 KiB, so
+                # a single call silently sends less than asked and returns how
+                # much. Ignoring the return value made the chunk-boundary case
+                # send 19 bytes fewer than it claimed and quietly measure
+                # truncation instead. Loop until it is all out.
+                view = memoryview(c.data)
+                while view:
+                    view = view[os.write(fd, view):]
+            except BrokenPipeError:
+                pass
+            if not c.hold:
+                os.close(fd)
+                fd = None
+        except OSError as e:
+            return False, f"could not write the case: {e}"
+
+        try:
+            _, err = proc.communicate(timeout=c.timeout + 15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            return False, "receiver did not exit"
+        finally:
+            if fd is not None:
+                os.close(fd)
+
+        rc = proc.returncode
+        err = err.decode(errors="replace")
+
+        lines = [l.strip() for l in err.strip().splitlines()]
+        hits = [l for l in lines if "POLICY VIOLATION" in l or "FAILED" in l]
+        last = hits[-1] if hits else (lines[-1] if lines else "")
+        if rc != c.expect_rc:
+            return False, f"exit {rc}, wanted {c.expect_rc} | {last}"
+        if c.expect_err and c.expect_err not in err:
+            return False, f"wanted {c.expect_err!r}, got: {last}"
+
+        # On-disk state matters as much as the exit code: a refused artifact must
+        # not be left behind for the ingest stage to find and treat as complete.
+        artdir = os.path.join(outdir, "artifacts")
+        landed = sorted(os.listdir(artdir)) if os.path.isdir(artdir) else []
+        if c.files is not None and landed != sorted(c.files):
+            return False, f"artifacts on disk {landed}, wanted {sorted(c.files)}"
+        return True, ""
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def build():
+    cases = []
+    A = cases.append
+
+    # ---------------------------------------------------------- must accept --
+    # These exist so the corpus can PASS. Without them a receiver that refused
+    # everything -- including a broken one -- would score a clean sweep.
+    A(Case("accept/single", "RES-006", valid("a.txt"), RC_OK, files=["a.txt"]))
+    A(Case("accept/several", "RES-006",
+           valid("a.txt") + valid("b.txt") + valid("c.txt"), RC_OK,
+           files=["a.txt", "b.txt", "c.txt"]))
+    A(Case("accept/exactly-at-artifact-cap", "RES-006",
+           frame("cap.bin", b"B" * MAX_ARTIFACT), RC_OK, files=["cap.bin"]))
+    A(Case("accept/exactly-max-files", "RES-006",
+           b"".join(valid(f"f{i}.txt") for i in range(MAX_FILES)), RC_OK,
+           files=[f"f{i}.txt" for i in range(MAX_FILES)]))
+    A(Case("accept/255-byte-name", "RES-006",
+           valid("n" * 255), RC_OK, files=["n" * 255]))
+
+    # ---------------------------------------------------------- must refuse --
+    A(Case("magic/bad", "OUT-003",
+           frame("a.txt", b"AAAA", magic=b"XXXX"), RC_VIOLATION, "bad frame magic"))
+    A(Case("magic/empty-then-valid", "OUT-003",
+           frame("a.txt", b"AAAA", magic=b"\0\0\0\0"), RC_VIOLATION, "bad frame magic"))
+
+    A(Case("namelen/zero", "RES-006",
+           frame("", b"AAAA", name_len=0), RC_VIOLATION, "bad name length"))
+    A(Case("namelen/over-255", "RES-006",
+           frame("n" * 256, b"AAAA"), RC_VIOLATION, "bad name length"))
+    A(Case("namelen/max-u16", "RES-006",
+           frame("a.txt", b"AAAA", name_len=65535), RC_VIOLATION, "bad name length"))
+
+    A(Case("size/over-artifact-cap", "RES-006",
+           frame("big.bin", b"", size=MAX_ARTIFACT + 1), RC_VIOLATION,
+           "exceeds per-file cap", files=[]))
+    A(Case("size/max-u64", "RES-006",
+           frame("big.bin", b"", size=2**64 - 1), RC_VIOLATION,
+           "exceeds per-file cap", files=[]))
+    A(Case("size/over-total-cap", "RES-006",
+           b"".join(frame(f"t{i}.bin", b"C" * MAX_ARTIFACT) for i in range(5)),
+           RC_VIOLATION, "would exceed total cap"))
+
+    # Truncation at every offset inside the 14-byte header.
+    full = valid("a.txt")
+    for n in range(1, HEADER.size):
+        A(Case(f"trunc/header-at-{n}", "RES-006", full[:n], RC_VIOLATION,
+               "truncated stream"))
+    A(Case("trunc/name-partial", "RES-006",
+           HEADER.pack(MAGIC, 8, 16) + b"abc", RC_VIOLATION, "truncated stream"))
+    A(Case("trunc/payload-midway", "RES-006",
+           frame("a.txt", b"", size=100) + b"D" * 50, RC_VIOLATION,
+           "truncated stream", files=[]))
+    # Exactly on a CHUNK boundary: read_exact returns b"" rather than raising,
+    # so this exercises the other of the receiver's two truncation paths.
+    A(Case("trunc/payload-on-chunk-boundary", "RES-006",
+           frame("a.txt", b"", size=65536 + 10) + b"E" * 65536, RC_VIOLATION,
+           "truncated at", files=[],
+           caps={"artifact": 1 << 20, "total": 1 << 20}))
+    A(Case("trunc/trailing-garbage", "RES-006",
+           valid("a.txt") + b"XX", RC_VIOLATION, "truncated stream"))
+
+    A(Case("name/duplicate", "AUD-002",
+           valid("same.txt") + valid("same.txt"), RC_VIOLATION,
+           "duplicate artifact name"))
+    for bad, label in [(b"a/b", "slash"), (b"../x", "traversal"),
+                       (b".hidden", "leading-dot"), (b".", "dot"),
+                       (b"..", "dotdot"), (b"a b", "space"),
+                       (b"a\x00b", "nul"), (b"\xff\xfe", "non-ascii"),
+                       (b"-lead", "leading-dash")]:
+        A(Case(f"name/illegal-{label}", "AUD-002",
+               frame(bad, b"AAAA"), RC_VIOLATION, "illegal artifact name"))
+
+    A(Case("count/over-max-files", "RES-006",
+           b"".join(valid(f"g{i}.txt") for i in range(MAX_FILES + 1)),
+           RC_VIOLATION, "artifact count cap reached"))
+
+    # ------------------------------------------------------------- pinned ----
+    # Current behaviour, asserted so a change is caught. Each names a decision
+    # that has NOT been made -- see the FINDING notes printed at the end.
+    A(Case("pinned/zero-length-artifact", "RES-006",
+           frame("empty.bin", b""), RC_OK, files=["empty.bin"],
+           note="size has an upper bound and no lower one, so a 0-byte artifact "
+                "is accepted. Undecided whether that is intended."))
+    A(Case("pinned/declared-size-never-delivered", "RES-006",
+           frame("stall.bin", b"", size=MAX_ARTIFACT), RC_NO_GUEST,
+           note="a guest that sends a header then stalls forever is reported as "
+                "rc 4 'no guest output before the deadline' -- but bytes DID "
+                "arrive, so a stalling guest is indistinguishable from one that "
+                "never connected.", timeout=3, files=[], hold=True))
+    return cases
+
+
+def main():
+    if not os.access(RECEIVER, os.X_OK):
+        print(f"receiver not executable: {RECEIVER}", file=sys.stderr)
+        return 2
+
+    cases = build()
+    accepts = [c for c in cases if c.expect_rc == RC_OK]
+    refuses = [c for c in cases if c.expect_rc == RC_VIOLATION]
+
+    # Lower bound. A corpus that built nothing must not report a clean sweep,
+    # and neither must one that lost its must-accept half.
+    if len(cases) < 40 or len(accepts) < 5 or len(refuses) < 25:
+        print(f"corpus too small: {len(cases)} cases "
+              f"({len(accepts)} accept, {len(refuses)} refuse); "
+              f"this run would be vacuous", file=sys.stderr)
+        return 2
+
+    print(f"\033[1mframing corpus: {len(cases)} cases "
+          f"({len(accepts)} must-accept, {len(refuses)} must-refuse)\033[0m")
+
+    failed, notes = 0, []
+    t0 = time.monotonic()
+    for c in cases:
+        ok, detail = run_case(c)
+        if ok:
+            print(f"  \033[32mPASS\033[0m  {c.stmt:<8} {c.cid}")
+        else:
+            print(f"  \033[31mFAIL\033[0m  {c.stmt:<8} {c.cid}: {detail}")
+            failed += 1
+        if c.note:
+            notes.append((c.cid, c.note))
+
+    print(f"\n{len(cases) - failed} passed, {failed} failed "
+          f"({time.monotonic() - t0:.1f}s)")
+    if notes:
+        print("\n\033[1mFINDINGS -- pinned behaviour, no decision taken:\033[0m")
+        for cid, note in notes:
+            print(f"  * {cid}\n      {note}")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
