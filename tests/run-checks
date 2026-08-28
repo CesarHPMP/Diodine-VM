@@ -178,10 +178,80 @@ if grep -rnE '\b(mount|losetup)\b' bin/ 2>/dev/null | grep -v '^\s*#' | grep -q 
 else
     ok "FS-002" "no host component mounts guest-authored data"
 fi
-if grep -rnE '\bsudo\b' bin/ image/build-base-image 2>/dev/null | grep -qv 'policy/apparmor/install'; then
-    bad "TCB-001" "a component invokes sudo"
+# TCB-001. The invariant is that no component EXECUTES an escalation binary --
+# not that the word never appears in one. The launcher legitimately PRINTS
+# `sudo policy/apparmor/install`, and since AUD-004 also `sudo usermod -aG
+# systemd-journal`: telling an operator what to provision out of band is the
+# opposite of escalating, and is the whole reason those two claims are
+# satisfiable without a privileged component.
+#
+# The previous check matched the bare word anywhere under bin/ and was kept quiet
+# by a line-content exemption -- any line mentioning 'policy/apparmor/install'
+# was dropped. That exemption would have been inherited by a real
+# `sudo policy/apparmor/install` CALL, so it hid exactly the thing it was written
+# around, and it broke the moment a second piece of advice named a different
+# command. Both are the same defect: matching a name instead of a behaviour.
+#
+# So: strip comments and here-doc bodies (--help is one, and it spells the
+# command out), then match an escalation binary in COMMAND position -- the first
+# word of a line, or straight after a shell separator. Advisory text reaches it
+# mid-string, after a colon, and does not match. Where the two are genuinely
+# ambiguous this errs toward firing, which is the direction a check should fail
+# in. Both directions are driven below.
+escalation_calls() {
+    awk '
+        BEGIN { hd = "" }
+        hd != "" { if ($0 ~ "^[[:space:]]*" hd "[[:space:]]*$") hd = ""; next }
+        /^[[:space:]]*#/ { next }
+        {
+            if (match($0, /<<-?[[:space:]]*[\047"]?[A-Za-z_][A-Za-z0-9_]*[\047"]?/)) {
+                t = substr($0, RSTART, RLENGTH)
+                sub(/^<<-?[[:space:]]*/, "", t)
+                gsub(/[\047"]/, "", t)
+                hd = t
+            }
+            print FILENAME ":" FNR ":" $0
+        }
+    ' "$@" 2>/dev/null \
+    | grep -E '(^[^:]*:[0-9]+:|[;&|(]|&&|\|\||\bthen\b|\bdo\b|\belse\b)[[:space:]]*\b(sudo|pkexec|doas|su)\b[[:space:]]'
+}
+
+ESC=$(escalation_calls bin/* image/build-base-image)
+if [ -n "$ESC" ]; then
+    bad "TCB-001" "a component invokes an escalation binary: $(printf '%s' "$ESC" | head -1)"
 else
     ok "TCB-001" "no component escalates privilege"
+fi
+
+# Driven, both ways. A check that has never rejected anything is not evidence,
+# and one that rejects everything is worse -- it would have failed this project's
+# own launcher forever and been silenced again. Stubs rather than hooks, per the
+# rule the fail-closed and consumer-scan checks already follow.
+ESCDIR="$TMP/escalation"; mkdir -p "$ESCDIR"
+printf '#!/bin/bash\nsudo mount -o loop /dev/x /mnt\n'                > "$ESCDIR/escalates"
+printf '#!/bin/bash\nif true; then pkexec sh -c x; fi\n'              > "$ESCDIR/escalates-nested"
+printf '#!/bin/bash\nsay "  load it once with:  sudo policy/apparmor/install"\n' > "$ESCDIR/advises"
+printf '#!/bin/bash\ncat <<USAGE\n  --flag  load with\n          sudo policy/apparmor/install\nUSAGE\n' > "$ESCDIR/advises-heredoc"
+
+if [ -n "$(escalation_calls "$ESCDIR/escalates")" ]; then
+    ok "TCB-001" "a sudo invocation is caught (driven)"
+else
+    bad "TCB-001" "a sudo invocation went unreported; the check cannot fire"
+fi
+if [ -n "$(escalation_calls "$ESCDIR/escalates-nested")" ]; then
+    ok "TCB-001" "an escalation after a shell separator is caught (driven)"
+else
+    bad "TCB-001" "pkexec mid-line went unreported; only line-initial calls are seen"
+fi
+if [ -n "$(escalation_calls "$ESCDIR/advises")" ]; then
+    bad "TCB-001" "advice naming sudo was read as an invocation"
+else
+    ok "TCB-001" "advice naming sudo is not an invocation (driven)"
+fi
+if [ -n "$(escalation_calls "$ESCDIR/advises-heredoc")" ]; then
+    bad "TCB-001" "--help text naming sudo was read as an invocation"
+else
+    ok "TCB-001" "here-doc help text naming sudo is not an invocation (driven)"
 fi
 if grep -qE 'import (zipfile|tarfile|gzip)' bin/ironveil-receiver; then
     bad "OUT-003" "receiver imports an archive library"
