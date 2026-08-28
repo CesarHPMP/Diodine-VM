@@ -473,13 +473,18 @@ policy:
     claim: Every run records whether MAC denial checking was available to it, and
            when it was, every denial the VMM's confinement profile produced during
            that run.
-    enforced_by: diodine-run anchors a journal position before launch and reads
-                 the window back after the VMM has exited, matching records
-                 carrying both apparmor="DENIED" and profile="diodine-qemu".
-                 Availability is decided by a live read, never by group
-                 membership. The result lands in the run's RUN.json as a denials
-                 block; when the read is unavailable that block says
-                 checked=false and gives the reason
+    enforced_by: diodine-run anchors a position before launch and reads the window
+                 back after the VMM has exited, matching records carrying both
+                 apparmor="DENIED" and profile="diodine-qemu". Two sources, in
+                 order: the denial feed installed by policy/apparmor/install -- a
+                 confined DynamicUser service holding the journal grant and
+                 publishing only this profile's denials to /run/diodine -- and,
+                 failing that, a direct journal read where the operator granted
+                 group membership instead. Availability is decided by a live
+                 probe, never by group membership, and a feed is trusted only
+                 while its service is RUNNING. The result lands in the run's
+                 RUN.json as a denials block naming the source; when no source is
+                 available that block says checked=false and gives the reason
     verify: RUN.json carries a denials block; tests/run-checks FAILS when it reads
             checked=false rather than skipping; the counter is driven positive by
             aa-exec -p diodine-qemu -- /bin/cat /etc/hostname, which is refused by
@@ -521,9 +526,36 @@ policy:
       from the same window and reports the count as a LOWER BOUND when it appears
       -- an upper bound with no lower bound is how a dead test passes.
 
-      Host-provisioned, like VMM-002's profile: sudo usermod -aG systemd-journal,
-      then log out and back in. policy/apparmor/install prints both steps, since it
-      is already the one place an operator is told to provision the host.
+      Host-provisioned, like VMM-002's profile, and by the same single command:
+      policy/apparmor/install now installs the denial feed alongside the profile,
+      because a profile without a way to see what it refuses is precisely the
+      condition that let the NUMA denial hide.
+
+      The shape of the grant is the design, not an implementation detail. Reading
+      denials needs privilege on every route a host offers -- dmesg is gated
+      behind CAP_SYSLOG when dmesg_restrict=1, the audit netlink socket needs
+      CAP_AUDIT_READ, the kernel keeps no per-profile denial counter, and journald
+      is gated on group membership. So the question is never "grant or no grant",
+      only what the grant covers. Adding the operator to systemd-journal gives
+      their account permanent read access to the entire system journal, for every
+      process they run, to answer a question about one AppArmor profile. The feed
+      narrows that to a transient DynamicUser account that exists only while the
+      service runs, publishing only lines naming this profile. No login gains
+      journal access and no root daemon is introduced, so TCB-001 is untouched.
+
+      Output goes to tmpfs, which costs no disk and needs no rotation; nothing
+      here needs to outlive a run, since the launcher reads a window bounded by
+      the run it just performed. Each line carries an epoch prefix written by the
+      feed rather than journalctl's own rendering, because journalctl formats
+      dates through the locale -- on the development host that is pt_BR, where
+      August prints as "ago" -- and a reader parsing month names would break on a
+      differently configured machine.
+
+      A feed that is INSTALLED BUT DEAD is the failure mode that matters: the file
+      exists, reads clean, and every run reports zero denials forever. So the
+      launcher requires the service to be RUNNING, not merely the file to exist,
+      and tests/run-checks drives that case directly -- a leftover file with a
+      dead service must be refused.
 
   - id: VMM-001
     claim: The VMM process runs unprivileged and under a seccomp sandbox.

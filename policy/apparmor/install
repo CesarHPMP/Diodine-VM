@@ -3,8 +3,8 @@
 # Copyright (C) 2026 César Henrique Policarpo de Melo
 # Load the Diodine VMM confinement profile. Requires root.
 #
-#     sudo policy/apparmor/install            # load
-#     sudo policy/apparmor/install --remove   # unload
+#     sudo policy/apparmor/install            # load profile + denial feed
+#     sudo policy/apparmor/install --remove   # unload both
 #
 # The profile is named (not path-attached), so loading it does not change the
 # behaviour of any other QEMU on this machine. Only diodine-run opts in, via
@@ -15,6 +15,12 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 TEMPLATE="$HERE/diodine-qemu.in"
 TARGET=/etc/apparmor.d/diodine-qemu
+# AUD-004's denial feed. Provisioned here because this is already the one place
+# an operator is told to prepare the host, and a profile without a way to see
+# what it refuses is the exact condition that let the NUMA denial hide.
+FEED_SRC="$ROOT/policy/denials"
+FEED_BIN=/usr/local/sbin/diodine-denial-writer
+FEED_UNIT=/etc/systemd/system/diodine-denials.service
 
 [ "$(id -u)" -eq 0 ] || { echo "must be run as root" >&2; exit 1; }
 command -v apparmor_parser >/dev/null || { echo "apparmor_parser not found" >&2; exit 1; }
@@ -22,6 +28,12 @@ command -v apparmor_parser >/dev/null || { echo "apparmor_parser not found" >&2;
 if [ "${1:-}" = "--remove" ]; then
     [ -f "$TARGET" ] && apparmor_parser -R "$TARGET" || true
     rm -f "$TARGET"
+    if [ -f "$FEED_UNIT" ]; then
+        systemctl disable --now diodine-denials.service >/dev/null 2>&1 || true
+        rm -f "$FEED_UNIT" "$FEED_BIN"
+        systemctl daemon-reload || true
+        echo "denial feed removed"
+    fi
     echo "diodine-qemu profile removed"
     exit 0
 fi
@@ -37,24 +49,47 @@ echo "loaded. verify with:"
 echo "    aa-status | grep diodine"
 echo "then re-run diodine-run; it should report 'confining under diodine-qemu'."
 echo
-echo "SECOND PROVISIONING STEP -- denial visibility (AUD-004)."
+echo "SECOND STEP -- denial visibility (AUD-004), installed for you below."
 echo
-echo "A loaded profile that silently refuses something is the failure this"
-echo "project has already had: the NUMA denial fired on every confined run"
-echo "while 26/26 checks passed twice. Reading denials needs journal access,"
-echo "and TCB-001 forbids Diodine a privileged component -- so the operator"
-echo "grants it once, out of band, and the launcher stays unprivileged:"
-echo
-echo "    sudo usermod -aG systemd-journal ${SUDO_USER:-YOUR_USER}"
-echo "    # then LOG OUT AND BACK IN -- see below"
-echo "    journalctl -k -n1        # must print a real kernel record"
-echo
-echo "The log-out is not optional and is the step people skip. Supplementary"
-echo "groups are fixed at login: usermod does not change any RUNNING process,"
-echo "so the shell you typed it in still cannot read the journal, and the next"
-echo "run will still record denials.checked=false. 'newgrp' only affects one"
-echo "subshell and changes your primary group besides."
-echo
-echo "Without this, runs still work -- they record that denial checking was"
-echo "unavailable, and tests/run-checks FAILS rather than reporting all-green"
-echo "while blind."
+
+# ------------------------------------------------------- denial feed (AUD-004) --
+# A loaded profile that silently refuses something is the failure this project has
+# already had: the NUMA denial fired on every confined run while 26/26 checks
+# passed twice, and nothing on disk recorded it.
+#
+# Reading denials needs privilege on every route a host offers, so the question is
+# not "grant or no grant" but what SHAPE the grant takes. The obvious answer --
+# usermod -aG systemd-journal -- gives the operator's account permanent read
+# access to the WHOLE system journal, for every process they run, to answer a
+# question about one AppArmor profile. This installs a confined service instead:
+# a transient DynamicUser account holds the journal grant, and publishes only
+# lines naming this project's own profile to a tmpfs file the launcher can read.
+# No login gains journal access and no root daemon is introduced.
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    install -m 0755 "$FEED_SRC/diodine-denial-writer" "$FEED_BIN"
+    install -m 0644 "$FEED_SRC/diodine-denials.service" "$FEED_UNIT"
+    systemctl daemon-reload
+    systemctl enable --now diodine-denials.service
+
+    # Verify by OBSERVED EFFECT, not by exit status. `systemctl enable --now`
+    # succeeds for a unit that starts and immediately dies, and a feed that is
+    # installed but dead would make every run report zero denials -- a failure
+    # toward a reassuring answer, which is the one direction this project cannot
+    # afford.
+    sleep 1
+    if systemctl is-active --quiet diodine-denials.service \
+       && [ -r /run/diodine/denials.log ]; then
+        echo "denial feed active: /run/diodine/denials.log"
+        echo "  no group membership was granted, and nothing runs as root."
+    else
+        echo "WARNING: the denial feed did not come up." >&2
+        echo "  runs will record denials.checked=false and tests/run-checks will" >&2
+        echo "  FAIL rather than report all-green while blind. Diagnose with:" >&2
+        echo "      systemctl status diodine-denials.service" >&2
+    fi
+else
+    echo "no systemd here, so the denial feed was not installed."
+    echo "runs will record denials.checked=false unless the operator arranges"
+    echo "journal access another way. tests/run-checks FAILS when blind rather"
+    echo "than reporting all-green."
+fi

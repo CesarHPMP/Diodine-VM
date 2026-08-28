@@ -191,6 +191,30 @@ DENIALS_WHY=""
 # "-- No entries --". Phase 1 already shipped that exact bug in the other
 # direction -- a dmesg pipeline that returned tail's status and reported "no
 # denials" from a log it never read.
+# Two sources, preferred in order. The FEED is the one policy/apparmor/install
+# provisions: a confined DynamicUser service holding the journal grant and
+# publishing only this profile's denials to tmpfs, so no login needs journal
+# access. Direct journal reading stays as the fallback for a host where the
+# operator granted group membership instead, or has no systemd.
+DENIAL_SOURCE=none
+DENIAL_FEED=/run/diodine/denials.log
+
+# A feed that is INSTALLED BUT DEAD is the dangerous case: the file exists, reads
+# clean, and every run reports zero denials forever. So liveness is required, not
+# merely presence -- "nothing happened" and "nothing was watching" must not read
+# alike, the same distinction AUD-001 draws between unknown and unconfined.
+feed_probe() {
+    [ -r "$DENIAL_FEED" ] || return 1
+    command -v systemctl >/dev/null 2>&1 || {
+        DENIALS_WHY="denial feed present but systemctl is absent to confirm it is running"
+        return 1; }
+    if ! systemctl is-active --quiet diodine-denials.service 2>/dev/null; then
+        DENIALS_WHY="denial feed file exists but diodine-denials.service is not running (stale file)"
+        return 1
+    fi
+    return 0
+}
+
 journal_probe() {
     command -v journalctl >/dev/null 2>&1 || {
         DENIALS_WHY="journalctl not present on this host"; return 1; }
@@ -218,6 +242,14 @@ capture_denial_anchor() {
 
 # Kernel records since the anchor. AppArmor denials arrive as transport=kernel.
 denial_window() {
+    if [ "$DENIAL_SOURCE" = feed ]; then
+        # Each line carries an epoch prefix written by the feed itself, so this
+        # needs no date parsing and is locale-proof. >= over > deliberately:
+        # one-second granularity should over-include, never under-include.
+        awk -v since="$DENIAL_SINCE" '$1 ~ /^[0-9]+$/ && $1 >= since' \
+            "$DENIAL_FEED" 2>/dev/null
+        return
+    fi
     if [ "$DENIAL_ANCHOR" = cursor ]; then
         journalctl -q -k --no-pager -o short --after-cursor "$DENIAL_CURSOR" 2>/dev/null
     else
@@ -229,6 +261,14 @@ denial_window() {
 # transport=kernel, so -k would filter out the very record that says the count is
 # short. Same window, no -k.
 suppression_window() {
+    if [ "$DENIAL_SOURCE" = feed ]; then
+        # The feed records its own truncation in-band, for the same reason the
+        # journal path reports journald's rate-limit notice: a count from a
+        # truncated window is a lower bound and must say so.
+        awk -v since="$DENIAL_SINCE" '$1 ~ /^[0-9]+$/ && $1 >= since && /TRUNCATED/ \
+            { print "Suppressed " $0 " messages" }' "$DENIAL_FEED" 2>/dev/null
+        return
+    fi
     if [ "$DENIAL_ANCHOR" = cursor ]; then
         journalctl -q --no-pager -o short --after-cursor "$DENIAL_CURSOR" 2>/dev/null
     else
@@ -252,8 +292,9 @@ record_denials() {
     local tmp="$out.denials"
 
     if [ "$DENIALS_OK" -eq 0 ]; then
-        DENIAL_JSON=$(printf '  "denials": {\n    "checked": false,\n    "anchor": "%s",\n    "reason": "%s"\n  }' \
-                      "$DENIAL_ANCHOR" "$(printf '%s' "$DENIALS_WHY" | json_str)")
+        DENIAL_JSON=$(printf '  "denials": {\n    "checked": false,\n    "source": "%s",\n    "anchor": "%s",\n    "reason": "%s"\n  }' \
+                      "$DENIAL_SOURCE" "$DENIAL_ANCHOR" \
+                      "$(printf '%s' "$DENIALS_WHY" | json_str)")
     else
         # Match both markers. profile= is a prefix test because a child profile
         # appears as diodine-qemu//something.
@@ -268,8 +309,8 @@ record_denials() {
                    | sed -e 's/^/      "/' -e 's/$/",/' | sed '$ s/,$//')
             recs=$(printf '\n%s\n    ' "$recs")
         fi
-        DENIAL_JSON=$(printf '  "denials": {\n    "checked": true,\n    "anchor": "%s",\n    "count": %s,\n    "suppressed": %s,\n    "recorded": %s,\n    "records": [%s]\n  }' \
-                      "$DENIAL_ANCHOR" "$n" "$supp" \
+        DENIAL_JSON=$(printf '  "denials": {\n    "checked": true,\n    "source": "%s",\n    "anchor": "%s",\n    "count": %s,\n    "suppressed": %s,\n    "recorded": %s,\n    "records": [%s]\n  }' \
+                      "$DENIAL_SOURCE" "$DENIAL_ANCHOR" "$n" "$supp" \
                       "$([ "$n" -gt "$DENIAL_RECORD_CAP" ] && echo "$DENIAL_RECORD_CAP" || echo "$n")" \
                       "$recs")
     fi
@@ -291,15 +332,18 @@ record_denials() {
 
 # Probed here, with the other preconditions, so an operator who has not granted
 # journal access learns it before the run rather than from RUN.json afterwards.
-if journal_probe; then
-    DENIALS_OK=1
+if feed_probe; then
+    DENIALS_OK=1; DENIAL_SOURCE=feed
+elif journal_probe; then
+    DENIALS_OK=1; DENIAL_SOURCE=journal
 else
     say "AUD-004 WARNING: cannot read AppArmor denials for this run"
     say "                 $DENIALS_WHY"
     say "                 the run will proceed and record denials.checked=false."
-    say "                 grant it once:  sudo usermod -aG systemd-journal $(id -un)"
-    say "                 then LOG OUT AND BACK IN (groups are fixed at login),"
-    say "                 and confirm with:  journalctl -k -n1"
+    say "                 install the denial feed once (no group, no root daemon):"
+    say "                     sudo policy/apparmor/install"
+    say "                 it runs a confined service that publishes only this"
+    say "                 profile's denials to /run/diodine/denials.log."
 fi
 
 # RES-007 (W3). The console goes straight to a host file, outside every export

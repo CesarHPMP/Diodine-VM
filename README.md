@@ -30,7 +30,7 @@ records what is deliberately still incomplete.
 ```sh
 ./image/build-base-image        # once: ~48 MB of downloads, checksum-verified
 sudo policy/apparmor/install    # once: load the VMM confinement profile
-sudo usermod -aG systemd-journal $USER   # once: denial visibility -- then LOG OUT
+# (install also sets up AUD-004 denial visibility -- no group, no root daemon)
 ./bin/diodine-run               # boot a disposable VM, run the default probe
 ./tests/run-checks              # verify the boundary is configured as claimed
 ./tests/adversarial/run         # hostile inputs against the receiver and ingest
@@ -42,17 +42,24 @@ to start** and exits 2 (`VMM-002` is fail-closed). If you genuinely want to run
 without MAC confinement, `--allow-unconfined` says so explicitly and the waiver
 is recorded in that run's `RUN.json`.
 
-The `usermod` step is what makes `AUD-004` work: a confinement profile that
-silently refuses something is the failure this project has already had — the
-AppArmor NUMA denial fired on *every* confined run while 26/26 checks passed
-twice. Reading denials needs journal access, and `TCB-001` forbids Diodine a
-privileged component, so the operator grants it once and the launcher stays
-unprivileged.
+`install` also provisions `AUD-004` denial visibility, because a confinement
+profile that silently refuses something is the failure this project has already
+had — the AppArmor NUMA denial fired on *every* confined run while 26/26 checks
+passed twice.
 
-**Log out and back in afterwards.** Supplementary groups are fixed at login, so
-`usermod` does not affect the shell you typed it in. Without the grant runs still
-work — they record `denials.checked: false` — but `tests/run-checks` **fails**
-rather than reporting all-green while blind.
+Reading denials needs privilege on every route a host offers, so the question is
+not *whether* to grant but *what the grant covers*. The obvious answer,
+`usermod -aG systemd-journal`, gives your account permanent read access to the
+**whole system journal** to answer a question about one AppArmor profile. Instead,
+`install` runs a confined service: a transient `DynamicUser` account holds the
+journal grant and publishes only this profile's denials to
+`/run/diodine/denials.log`. No login gains journal access, nothing runs as root,
+and `TCB-001` is untouched.
+
+A feed that is installed but **dead** would read clean forever, so the launcher
+requires the service to be running, not merely the file to exist. Without any
+source runs still work — they record `denials.checked: false` — but
+`tests/run-checks` **fails** rather than reporting all-green while blind.
 
 Analysing something:
 

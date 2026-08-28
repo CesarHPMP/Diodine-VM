@@ -629,6 +629,56 @@ head_ "M. MAC denial visibility (AUD-004)"
 
 DJ() { sed -n "s/.*\"$1\": \"\{0,1\}\([^\",]*\)\"\{0,1\},\{0,1\}.*/\1/p" "$2" | head -1; }
 
+# --- the denial feed, driven in isolation -----------------------------------
+# feed_probe decides whether AUD-004 has a source at all, so its failure modes
+# matter more than its success. It cannot be exercised by running the launcher
+# here -- the feed lives at a fixed path under /run that only root can create --
+# so the function is extracted and driven directly, the same way the AUD-001
+# fallback check already extracts record_launch_state. No test hook is added to
+# the product for this.
+FEEDFN="$TMP/feedfn"
+sed -n '/^feed_probe() {/,/^}$/p' bin/diodine-run > "$FEEDFN"
+if [ ! -s "$FEEDFN" ]; then
+    bad "AUD-004" "could not extract feed_probe; this check is vacuous"
+else
+    FSTUB="$TMP/feedstub"; mkdir -p "$FSTUB"
+    FAKEFEED="$TMP/denials.log"; : > "$FAKEFEED"
+
+    probe_with() {  # probe_with <systemctl-exit> ; echoes rc and reason
+        printf '#!/bin/sh\nexit %s\n' "$1" > "$FSTUB/systemctl"
+        chmod +x "$FSTUB/systemctl"
+        ( set +u
+          PATH="$FSTUB:$PATH"
+          DENIAL_FEED="$2"
+          DENIALS_WHY=""
+          . "$FEEDFN"
+          feed_probe; echo "rc=$? why=$DENIALS_WHY" )
+    }
+
+    # Live service + readable feed: the only case that may be trusted.
+    if probe_with 0 "$FAKEFEED" | grep -q '^rc=0'; then
+        ok "AUD-004" "a live feed with a running service is accepted"
+    else
+        bad "AUD-004" "a healthy feed was rejected; the feed path can never be used"
+    fi
+
+    # The dangerous case, and the reason liveness is checked at all. A feed file
+    # left behind by a stopped service reads clean forever, so every run would
+    # report zero denials and the suite would go green while nothing watched.
+    if probe_with 3 "$FAKEFEED" | grep -q '^rc=1'; then
+        ok "AUD-004" "a stale feed whose service is dead is REFUSED (driven)"
+    else
+        bad "AUD-004" "a dead service with a leftover feed file was trusted"
+    fi
+
+    # Absent feed must fall through to the journal path, not error out.
+    if probe_with 0 "$TMP/definitely-absent" | grep -q '^rc=1'; then
+        ok "AUD-004" "an absent feed falls through to the journal source"
+    else
+        bad "AUD-004" "a missing feed file was treated as a usable source"
+    fi
+fi
+
 DRUN="$PROBE/RUN.json"
 if [ ! -r "$DRUN" ]; then
     bad "AUD-004" "the probe run recorded no RUN.json to carry a denials block"

@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 César Henrique Policarpo de Melo
+[Unit]
+Description=Diodine VM AppArmor denial feed (AUD-004)
+Documentation=https://github.com/CesarHPMP/Diodine-VM
+After=systemd-journald.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/diodine-denial-writer
+Restart=always
+RestartSec=2
+
+# The whole point of this unit. DynamicUser gives it a transient account that
+# exists only while it runs, and SupplementaryGroups puts the journal grant on
+# THAT account instead of on the operator's. Nobody's login gains journal access,
+# and no root daemon is introduced.
+DynamicUser=yes
+SupplementaryGroups=systemd-journal
+
+# /run/diodine, owned by the transient user, world-readable so the unprivileged
+# launcher can read the feed. tmpfs: no disk cost, cleared on reboot.
+RuntimeDirectory=diodine
+RuntimeDirectoryMode=0755
+
+# It reads one log and writes one file. Nothing else.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

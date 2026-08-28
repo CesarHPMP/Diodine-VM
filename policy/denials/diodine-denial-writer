@@ -1,0 +1,52 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 César Henrique Policarpo de Melo
+#
+# AUD-004 denial feed. Exposes THIS PROJECT'S AppArmor denials to an
+# unprivileged launcher without granting anybody journal access.
+#
+# The problem it solves: reading AppArmor denials needs privilege on every route
+# a host offers -- dmesg is gated behind CAP_SYSLOG when dmesg_restrict=1, the
+# audit netlink socket needs CAP_AUDIT_READ, the kernel keeps no per-profile
+# denial counter, and journald is gated on group membership. So the question is
+# never "grant or no grant", only what SHAPE the grant takes. Adding the operator
+# to systemd-journal gives their account permanent read access to the entire
+# system journal, for every process they run, to answer a question about one
+# AppArmor profile. This narrows that to: one confined service account, reading
+# the journal, emitting only lines naming this project's own profile.
+#
+# Output is /run/diodine/denials.log -- tmpfs, so it costs no disk, needs no
+# rotation, and disappears on reboot. Nothing here needs to outlive a run: the
+# launcher reads a time window bounded by the run it just performed.
+set -u
+
+LOG=/run/diodine/denials.log
+PROFILE="${DIODINE_PROFILE:-diodine-qemu}"
+MAXBYTES="${DIODINE_DENIAL_MAXBYTES:-1048576}"
+
+: > "$LOG"
+chmod 0644 "$LOG"
+
+# Each line is prefixed with an EPOCH timestamp written by this script, never
+# journalctl's own rendering. journalctl -o short formats dates through the
+# locale -- on this host that is pt_BR, where August prints as "ago" -- and a
+# reader parsing month names would break on a machine configured differently.
+# An integer needs no parsing and no locale. -o cat gives the message text only,
+# for the same reason.
+journalctl -k -f -o cat --since=now 2>/dev/null | while IFS= read -r line; do
+    # Two independent tests rather than one pattern spanning both fields: the
+    # order of apparmor= and profile= within an audit record is not guaranteed,
+    # and a single wildcard pattern would silently stop matching if it changed.
+    case "$line" in *'apparmor="DENIED"'*) ;; *) continue ;; esac
+    case "$line" in *"profile=\"$PROFILE"*) ;; *) continue ;; esac
+
+    # A denial storm must not fill tmpfs. Truncation is recorded IN the file, so
+    # a reader can tell a truncated window from a quiet one -- the same reason
+    # the launcher already reports journald's own "Suppressed N messages" as a
+    # lower bound rather than folding it into a total.
+    if [ "$(stat -c %s "$LOG" 2>/dev/null || echo 0)" -gt "$MAXBYTES" ]; then
+        : > "$LOG"
+        printf '%s TRUNCATED max_bytes=%s\n' "$(date +%s)" "$MAXBYTES" >> "$LOG"
+    fi
+    printf '%s %s\n' "$(date +%s)" "$line" >> "$LOG"
+done
