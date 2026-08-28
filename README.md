@@ -1,5 +1,14 @@
 # Diodine VM — Phase 2 (in progress)
 
+[![CI](https://github.com/CesarHPMP/Diodine-VM/actions/workflows/ci.yml/badge.svg)](https://github.com/CesarHPMP/Diodine-VM/actions/workflows/ci.yml)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+
+> The CI badge covers static hygiene and the adversarial corpora. It does **not**
+> run `tests/run-checks` — that needs KVM, a loaded AppArmor profile and journal
+> access, which no hosted runner has. A green badge says the tree is well-formed
+> and the hostile-input corpora pass. It says nothing about whether the boundary
+> holds.
+
 A capability-restricted malware analysis environment.
 
 `diodine.md` is the design document and threat model. `policy/policy.yaml` is
@@ -22,9 +31,10 @@ records what is deliberately still incomplete.
 ./image/build-base-image        # once: ~48 MB of downloads, checksum-verified
 sudo policy/apparmor/install    # once: load the VMM confinement profile
 sudo usermod -aG systemd-journal $USER   # once: denial visibility -- then LOG OUT
-./bin/diodine-run              # boot a disposable VM, run the default probe
+./bin/diodine-run               # boot a disposable VM, run the default probe
 ./tests/run-checks              # verify the boundary is configured as claimed
 ./tests/adversarial/run         # hostile inputs against the receiver and ingest
+./tests/lint                    # static hygiene (no VM needed; this is what CI runs)
 ```
 
 The `install` step is not optional. Without the profile loaded, a run **refuses
@@ -149,6 +159,7 @@ warns if `--timeout` goes past an hour, where that figure stops being small.
 ```
 diodine.md              design document and threat model
 LICENSE                 GNU GPL v3 (verbatim); see Licence below
+SECURITY.md             reporting policy, and what is knowingly not fixed
 NEXT.md                 Phase 2 plan: workstreams, test rules, live-sample gate
 BACKLOG.md              deferred BY DESIGN, with what would close each item
 policy/policy.yaml      every claim, its enforcement point, its status
@@ -161,6 +172,8 @@ guest/diodine-send      guest-side artifact emitter
 image/build-base-image  builds the RAM-only Alpine base
 tests/run-checks        verification harness, keyed to policy IDs
 tests/adversarial/      Phase 2 hostile-input suite (frames, ingest)
+tests/lint              static hygiene; the part CI can run
+.github/workflows/      CI and CodeQL
 quarantine/             untrusted output (gitignored)
 ```
 

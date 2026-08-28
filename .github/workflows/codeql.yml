@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 César Henrique Policarpo de Melo
+#
+# Static analysis of the Python components. The two that matter are
+# bin/diodine-receiver and bin/diodine-ingest -- the receiver is the only thing
+# that parses guest-controlled STRUCTURE, and ingest is the only thing that parses
+# guest-controlled CONTENT. ingest's own docstring is blunt that it is a
+# resource-safety and path-safety control, not a memory-safety boundary, since
+# zipfile and tarfile parse hostile input and have their own CVE history.
+#
+# CodeQL does not change that and is not a substitute for the design answer, which
+# is to move the stage into a second disposable VM. It is a cheap second opinion
+# on the host-side code that exists today.
+
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'   # Mondays; picks up newly published queries
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  analyse:
+    name: Analyse Python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          # The components have no .py suffix -- they are run directly by name --
+          # so the extractor is pointed at them explicitly.
+          config: |
+            paths:
+              - bin
+              - tests
+      - uses: github/codeql-action/analyze@v3

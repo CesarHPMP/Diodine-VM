@@ -1,0 +1,112 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 César Henrique Policarpo de Melo
+# Diodine VM static hygiene.
+#
+# Everything here is checkable WITHOUT a VM, without root, and without the
+# AppArmor profile loaded -- which is precisely the set CI can run. It verifies
+# that the tree parses, builds, and carries its licence, and nothing about
+# whether the boundary holds. tests/run-checks does that, and cannot run here.
+#
+# Built to the same rule as the rest of Phase 2: every count has a LOWER bound.
+# A glob that silently matches nothing would otherwise sweep clean, which is the
+# single most common way a check in this project has failed toward a reassuring
+# answer.
+set -uo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
+cd "$ROOT"
+
+PASS=0; FAIL=0
+ok()    { printf '  \033[32mPASS\033[0m  %-9s %s\n' "$1" "$2"; PASS=$((PASS+1)); }
+bad()   { printf '  \033[31mFAIL\033[0m  %-9s %s\n' "$1" "$2"; FAIL=$((FAIL+1)); }
+head_() { printf '\n\033[1m%s\033[0m\n' "$1"; }
+
+printf '\033[1mDiodine VM static hygiene\033[0m\n'
+
+# Source files, by interpreter. Derived from git rather than a hand-kept list,
+# so a new file is covered the day it is added.
+mapfile -t SH_FILES < <(git ls-files | while read -r f; do
+    head -1 "$f" 2>/dev/null | grep -q '^#!.*\(bash\|sh\)$' && echo "$f"; done)
+mapfile -t PY_FILES < <(git ls-files | while read -r f; do
+    head -1 "$f" 2>/dev/null | grep -q '^#!.*python3$' && echo "$f"; done)
+mapfile -t SRC_FILES < <(git ls-files | grep -vE '\.md$|^LICENSE$|^\.gitignore$|^\.github/')
+
+head_ "A. Lower bounds on this harness itself"
+if [ "${#SH_FILES[@]}" -ge 10 ]; then
+    ok "LINT" "found ${#SH_FILES[@]} shell scripts to check"
+else
+    bad "LINT" "found only ${#SH_FILES[@]} shell scripts; this run would be vacuous"
+fi
+if [ "${#PY_FILES[@]}" -ge 5 ]; then
+    ok "LINT" "found ${#PY_FILES[@]} python scripts to check"
+else
+    bad "LINT" "found only ${#PY_FILES[@]} python scripts; this run would be vacuous"
+fi
+
+head_ "B. Everything parses"
+n=0
+for f in "${SH_FILES[@]}"; do
+    bash -n "$f" 2>/dev/null || { bad "LINT" "shell syntax error: $f"; continue; }
+    n=$((n+1))
+done
+[ "$n" -eq "${#SH_FILES[@]}" ] && ok "LINT" "all $n shell scripts parse"
+
+n=0
+for f in "${PY_FILES[@]}"; do
+    python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$f" 2>/dev/null \
+        || { bad "LINT" "python syntax error: $f"; continue; }
+    n=$((n+1))
+done
+[ "$n" -eq "${#PY_FILES[@]}" ] && ok "LINT" "all $n python scripts parse"
+
+if command -v gcc >/dev/null 2>&1; then
+    if gcc -static -O2 -o /dev/null tests/out002/probe.c 2>/dev/null; then
+        ok "LINT" "tests/out002/probe.c builds"
+    else
+        bad "LINT" "tests/out002/probe.c does not build"
+    fi
+else
+    bad "LINT" "gcc absent; the OUT-002 probe was not built"
+fi
+
+head_ "C. Policy file is readable by its own tooling"
+NIDS=$(grep -cE '^  - id: [A-Z]' policy/policy.yaml)
+if [ "$NIDS" -ge 20 ]; then
+    ok "POLICY" "policy.yaml parses to $NIDS statements"
+else
+    bad "POLICY" "policy.yaml parsed to $NIDS statements; the parser has drifted"
+fi
+DUPES=$(grep -oE '^  - id: [A-Z0-9-]+' policy/policy.yaml | sort | uniq -d)
+if [ -z "$DUPES" ]; then
+    ok "POLICY" "no duplicate statement ids"
+else
+    bad "POLICY" "duplicate statement ids: $(echo $DUPES | tr '\n' ' ')"
+fi
+
+head_ "D. Licence notices (GPL-3.0-or-later)"
+MISSING=""
+for f in "${SRC_FILES[@]}"; do
+    grep -q 'SPDX-License-Identifier' "$f" || MISSING="$MISSING $f"
+done
+if [ -z "$MISSING" ]; then
+    ok "LICENSE" "all ${#SRC_FILES[@]} source files carry an SPDX identifier"
+else
+    bad "LICENSE" "no SPDX identifier in:$MISSING"
+fi
+WRONG=$(grep -rhoE 'SPDX-License-Identifier: [^ ]+' "${SRC_FILES[@]}" | sort -u | grep -v 'GPL-3.0-or-later' || true)
+if [ -z "$WRONG" ]; then
+    ok "LICENSE" "every identifier reads GPL-3.0-or-later"
+else
+    bad "LICENSE" "inconsistent licence identifiers: $(echo $WRONG | tr '\n' ' ')"
+fi
+if [ -s LICENSE ] && head -2 LICENSE | grep -q 'GNU GENERAL PUBLIC LICENSE' \
+   && grep -q 'Version 3, 29 June 2007' LICENSE; then
+    ok "LICENSE" "LICENSE is the GPL v3 text ($(wc -l < LICENSE) lines)"
+else
+    bad "LICENSE" "LICENSE is missing or is not the GPL v3 text"
+fi
+
+printf '\n\033[1m%d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ]

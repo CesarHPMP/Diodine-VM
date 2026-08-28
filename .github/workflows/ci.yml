@@ -1,0 +1,66 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 César Henrique Policarpo de Melo
+#
+# What this workflow can and cannot establish, stated up front because a green
+# check mark is exactly the kind of reassuring signal this project keeps finding
+# to be wrong:
+#
+#   CAN   -- the tree parses, builds and carries its licence (tests/lint), and
+#            the adversarial corpora pass (tests/adversarial/run). Those 61 cases
+#            drive the REAL receiver and the REAL ingest binary, so they are
+#            genuine evidence about the two components that parse hostile input.
+#
+#   CANNOT -- anything about whether the isolation boundary holds. tests/run-checks
+#            needs KVM, a loaded AppArmor profile, a systemd user scope and journal
+#            access. A GitHub runner has none of them, and faking any of it would
+#            produce a passing check that certifies nothing -- the precise failure
+#            mode NEXT.md was written about.
+#
+# So CI is a hygiene gate, not a verification of the security claims. The boundary
+# is verified by running tests/run-checks on a provisioned host, and nowhere else.
+
+name: CI
+
+on:
+  push:
+    branches: [main, 'phase*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    name: Static hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: tests/lint
+        run: ./tests/lint
+
+  adversarial:
+    name: Adversarial corpora
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python version in use
+        run: python3 --version
+      # Not piped into anything. The exit status is the result -- piping a
+      # harness into tail once masked a failing status here for a whole session.
+      - name: tests/adversarial/run
+        run: ./tests/adversarial/run
+
+  scope:
+    name: What CI did not verify
+    runs-on: ubuntu-latest
+    needs: [static, adversarial]
+    steps:
+      - name: State the gap
+        run: |
+          echo "::notice title=Not verified by CI::tests/run-checks did NOT run."
+          echo "It requires KVM, a loaded AppArmor profile (diodine-qemu), a"
+          echo "systemd user scope and journal access. A passing CI run says"
+          echo "the tree is well-formed and the adversarial corpora pass. It"
+          echo "says nothing about whether the isolation boundary holds."
