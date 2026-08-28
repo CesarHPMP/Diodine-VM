@@ -1,4 +1,4 @@
-# Ironveil — Phase 1
+# Ironveil — Phase 2 (in progress)
 
 A capability-restricted malware analysis environment.
 
@@ -6,22 +6,43 @@ A capability-restricted malware analysis environment.
 the machine-readable policy: every security claim, where it is enforced, how it
 is verified, and — importantly — which claims are **not** enforced yet.
 
-This is Phase 1: an architecture prototype on commodity Linux, built to be
-tested rather than deployed. Do not put live malware in it (see *Scope* below).
+An architecture prototype on commodity Linux, built to be tested rather than
+deployed. Do not put live malware in it (see *Scope* below, and the gate in
+`BACKLOG.md`).
+
+Phase 1 built the boundary. Phase 2 attacks it, and starts from the lesson Phase
+1 actually taught: it found no isolation failure, but it found observability
+failures — and then roughly ten failures in the *instruments* used to look for
+them, every one of which failed toward a **reassuring** answer. `BACKLOG.md`
+records what is deliberately still incomplete.
 
 ## Quickstart
 
 ```sh
 ./image/build-base-image        # once: ~48 MB of downloads, checksum-verified
 sudo policy/apparmor/install    # once: load the VMM confinement profile
+sudo usermod -aG systemd-journal $USER   # once: denial visibility -- then LOG OUT
 ./bin/ironveil-run              # boot a disposable VM, run the default probe
 ./tests/run-checks              # verify the boundary is configured as claimed
+./tests/adversarial/run         # hostile inputs against the receiver and ingest
 ```
 
 The `install` step is not optional. Without the profile loaded, a run **refuses
 to start** and exits 2 (`VMM-002` is fail-closed). If you genuinely want to run
 without MAC confinement, `--allow-unconfined` says so explicitly and the waiver
 is recorded in that run's `RUN.json`.
+
+The `usermod` step is what makes `AUD-004` work: a confinement profile that
+silently refuses something is the failure this project has already had — the
+AppArmor NUMA denial fired on *every* confined run while 26/26 checks passed
+twice. Reading denials needs journal access, and `TCB-001` forbids Ironveil a
+privileged component, so the operator grants it once and the launcher stays
+unprivileged.
+
+**Log out and back in afterwards.** Supplementary groups are fixed at login, so
+`usermod` does not affect the shell you typed it in. Without the grant runs still
+work — they record `denials.checked: false` — but `tests/run-checks` **fails**
+rather than reporting all-green while blind.
 
 Analysing something:
 
@@ -114,14 +135,21 @@ Known gaps, all recorded in `policy/policy.yaml`:
 | `OUT-002` | The channel is directional, not perfectly one-way. **Measured** (`tests/out002/`): buffer depth 585728 bytes, detection floor ~8 ms, and ~450 symbols per run — capacity is bounded by `RES-006`'s byte cap, since each symbol costs the guest ~0.56 MiB of export budget. Raising `--max-total` raises it proportionally. |
 | `RES-008` | Nothing *bounds* quarantine growth **across** runs — `RES-006` caps one run at 256 MB and nothing caps the count. Every run now reports the cumulative total and warns past `--quarantine-warn-mb` (default 5000). Nothing prunes automatically; retention is yours. |
 | `QUAR-001` | Quarantine exclusion markers are advisory. A startup scan now names any indexer, thumbnailer, AV or backup agent that is running, and records it in `RUN.json` — but it warns rather than blocks, and configuring those tools to skip the directory is still out of band. |
-| `RES-007` | The guest console writes straight to a host file, outside the export caps. Measured at ~50 KB/s (the emulated UART is the limit), so ~9 MB at the default budget — bounded by the wall clock, not by a cap. Account for it if you raise `--timeout` into the hours. |
 | `PLAT-001` | Microarchitectural side channels are inherited from the platform and out of scope. |
+
+`RES-007` used to sit in that table. It is now a **decision**, not a gap: the
+console stays outside the export caps because `-chardev file` never blocks QEMU,
+so it carries no backpressure and no timing channel. Capping it would mean a
+bounded writer, which would buy a byte cap at the price of a second
+`OUT-002`-style covert channel — a bad trade against a 9 MB write. The launcher
+warns if `--timeout` goes past an hour, where that figure stops being small.
 
 ## Layout
 
 ```
 ironveil.md              design document and threat model
 NEXT.md                  Phase 2 plan: workstreams, test rules, live-sample gate
+BACKLOG.md               deferred BY DESIGN, with what would close each item
 policy/policy.yaml       every claim, its enforcement point, its status
 policy/apparmor/         VMM confinement profile and installer
 bin/ironveil-run         hardened launcher; the QEMU args ARE the policy
@@ -131,6 +159,7 @@ guest/init               guest PID 1
 guest/ironveil-send      guest-side artifact emitter
 image/build-base-image   builds the RAM-only Alpine base
 tests/run-checks         verification harness, keyed to policy IDs
+tests/adversarial/       Phase 2 hostile-input suite (frames, ingest)
 quarantine/              untrusted output (gitignored)
 ```
 

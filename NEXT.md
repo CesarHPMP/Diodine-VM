@@ -4,6 +4,23 @@
 attack. This document is the operational version: what to build, in what order,
 and what has to be true before live samples are allowed anywhere near it.
 
+## Status
+
+| workstream | status |
+| --- | --- |
+| **W1** denial visibility | **done** — `AUD-004`. Journal-anchored, unprivileged, availability decided by live read. The launcher records; `tests/run-checks` fails when blind. |
+| **W2** adversarial suite | **started** — `tests/adversarial/` (framing corpus, ingest corpus). Exhaustion and in-VM cases still to come. |
+| **W3** `RES-007` | **decided** — console stays uncapped; `policy.yaml` carries the reasoning, and it is no longer filed as a gap. |
+| W4 `OUT-002` deeper | deferred → `BACKLOG.md` |
+| W5 portability | deferred → `BACKLOG.md`. Host provenance now lands in `RUN.json` so existing numbers stay attributable. |
+| W6 `QUAR-001` structurally | deferred → `BACKLOG.md` |
+| W7 `RES-008` retention | deferred → `BACKLOG.md` |
+| W8 live-sample gate | gate items 1 and 4 closed, 2 in progress; see `BACKLOG.md` |
+
+The deferrals are recorded in `BACKLOG.md` rather than dropped, so what is
+incomplete stays visible. The rest of this document is the original plan, kept
+as written for the reasoning it carries.
+
 ## Where Phase 1 ended
 
 31 policy statements, 58 checks. By status:
