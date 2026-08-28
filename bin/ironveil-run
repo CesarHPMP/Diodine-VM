@@ -300,6 +300,19 @@ else
     say "                 and confirm with:  journalctl -k -n1"
 fi
 
+# RES-007 (W3). The console goes straight to a host file, outside every export
+# cap, bounded by the wall clock and the emulated 16550's ~50 KB/s ceiling --
+# about 9 MB at the default 180s budget. That is a decided trade-off rather than
+# a gap: -chardev file never blocks QEMU, so the console carries no backpressure
+# and therefore no OUT-002-style timing channel, where a bounded writer would
+# give it both. The trade only holds while the budget is short, so say so when
+# it stops being.
+if [ "$TIMEOUT" -gt 3600 ]; then
+    say "RES-007 NOTE: a ${TIMEOUT}s budget allows roughly $((TIMEOUT * 50 / 1024)) MB of console"
+    say "              output, which no export cap covers. The console is uncapped"
+    say "              by design; at this budget its size stops being negligible."
+fi
+
 # -------------------------------------------------------------- run scaffold --
 RUNBASE="${XDG_RUNTIME_DIR:-/tmp}/ironveil"
 mkdir -p "$RUNBASE"; chmod 0700 "$RUNBASE"

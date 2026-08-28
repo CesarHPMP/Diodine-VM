@@ -245,25 +245,43 @@ policy:
     status: enforced
 
   - id: RES-007
-    claim: Guest console output goes straight to a host file, outside the export
-           caps, and is bounded only indirectly.
-    enforced_by: RES-005's wall clock, plus the throughput ceiling of the
-                 emulated 16550 UART. RES-006 does not apply -- console bytes
-                 never pass through the receiver, so nothing charges them
-                 against a cap
+    claim: Guest console output is deliberately left outside the export caps, and
+           bounded instead by the wall clock and the emulated 16550's throughput
+           ceiling -- about 9 MB at the default 180 second budget.
+    enforced_by: RES-005's wall clock, plus the ~50 KB/s ceiling of the emulated
+                 16550 UART. RES-006 deliberately does not apply -- console bytes
+                 never pass through the receiver, so nothing charges them against
+                 a cap, and that is the decision rather than the gap
     verify: a guest writing to /dev/console as fast as it can sustains roughly
-            50 KB per second, so about 9 MB at the default 180 second budget
-    status: partial
-    note: Measured rather than assumed, after being flagged as a possible
-           unbounded host write. 45 KB per second with small writes, 52 KB per
-           second with 64 KB blocks and four concurrent writers -- concurrency
-           does not raise it, because the 16550 is a single serialized device.
-           That is not a disk-exhaustion path at any plausible budget, but it is
-           the one guest-to-host byte path RES-006 does not cover, and a
-           --timeout raised into the hours should account for it. The check
-           exists mainly as a tripwire -- replacing the serial chardev with
-           virtio-console would raise the ceiling by orders of magnitude and
-           this is what would notice.
+            50 KB per second, so about 9 MB at the default 180 second budget; the
+            launcher warns when --timeout exceeds an hour, where that figure stops
+            being negligible
+    status: enforced
+    note: |
+      Decided in Phase 2 (NEXT.md W3) rather than left open. This previously read
+      "bounded only indirectly" at status partial, which described it as an
+      unclosed gap. It is not one; it is a trade.
+
+      Bringing the console inside the byte budget means replacing -chardev file
+      with a second FIFO drained by a bounded writer -- QEMU offers no size bound
+      on the file backend (checked: path and append, nothing else). But
+      -chardev file is timing-inert precisely BECAUSE it is unbounded: QEMU never
+      blocks on it. A bounded writer would buy a byte cap at the cost of a second
+      OUT-002-style timing channel, one the guest could modulate exactly as it
+      modulates the artifact channel. Capping the console and keeping it inert are
+      in tension and cannot both be had.
+
+      At ~50 KB/s the uncapped version is cheap: 9 MB per default run, against a
+      256 MB export cap on the channel that IS bounded. Paying a covert channel to
+      close a 9 MB write is a bad trade, so it is not made.
+
+      Measured rather than assumed: 45 KB per second with small writes, 52 KB per
+      second with 64 KB blocks and four concurrent writers -- concurrency does not
+      raise it, because the 16550 is a single serialized device.
+
+      The tripwire check in tests/run-checks stays, and is the real point of the
+      number. Replacing the serial chardev with virtio-console would raise this
+      ceiling by orders of magnitude, and that check is what would notice.
 
   - id: ING-001
     claim: Decompression of exported archives is bounded by ratio, absolute
