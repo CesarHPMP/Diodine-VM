@@ -35,5 +35,24 @@ echo "loaded. verify with:"
 echo "    aa-status | grep ironveil"
 echo "then re-run ironveil-run; it should report 'confining under ironveil-qemu'."
 echo
-echo "if a run now fails, check for denials:"
-echo "    sudo dmesg | grep -i 'apparmor.*ironveil'"
+echo "SECOND PROVISIONING STEP -- denial visibility (AUD-004)."
+echo
+echo "A loaded profile that silently refuses something is the failure this"
+echo "project has already had: the NUMA denial fired on every confined run"
+echo "while 26/26 checks passed twice. Reading denials needs journal access,"
+echo "and TCB-001 forbids Ironveil a privileged component -- so the operator"
+echo "grants it once, out of band, and the launcher stays unprivileged:"
+echo
+echo "    sudo usermod -aG systemd-journal ${SUDO_USER:-YOUR_USER}"
+echo "    # then LOG OUT AND BACK IN -- see below"
+echo "    journalctl -k -n1        # must print a real kernel record"
+echo
+echo "The log-out is not optional and is the step people skip. Supplementary"
+echo "groups are fixed at login: usermod does not change any RUNNING process,"
+echo "so the shell you typed it in still cannot read the journal, and the next"
+echo "run will still record denials.checked=false. 'newgrp' only affects one"
+echo "subshell and changes your primary group besides."
+echo
+echo "Without this, runs still work -- they record that denial checking was"
+echo "unavailable, and tests/run-checks FAILS rather than reporting all-green"
+echo "while blind."

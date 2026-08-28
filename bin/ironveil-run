@@ -159,6 +159,147 @@ elif [ "$ALLOW_UNCONFINED" -eq 0 ]; then
     exit 2
 fi
 
+# ------------------------------------------------- MAC denial visibility (W1) --
+# AUD-004. A loaded profile that refuses something can cost nothing visible: the
+# NUMA denial fired on EVERY confined run while 26/26 checks passed twice, and
+# nothing on disk recorded it. A run has to be able to say whether its own
+# confinement refused anything.
+#
+# The evidence lives in the kernel audit log, which TCB-001 forbids this launcher
+# the privilege to read. So the operator grants journal access once, out of band
+# (policy/apparmor/install prints the step), and this stays unprivileged. When the
+# grant is absent the run still happens and RECORDS that it was blind, the way
+# QUAR-001 warns rather than refusing -- Ironveil cannot fix a host-wide condition
+# and refusing every run on an unprovisioned host would not make it any safer.
+# tests/run-checks is what refuses to be blind.
+DENIAL_ANCHOR=none
+DENIAL_CURSOR=""
+DENIAL_SINCE=0
+DENIALS_OK=0
+DENIALS_WHY=""
+
+# Availability by LIVE READ, never by group membership. `id -Gn | grep
+# systemd-journal` reports success in a fresh login session and failure in a stale
+# one -- supplementary groups are fixed at login, so usermod does not change any
+# running process -- and reports success on a host whose journal ACL has been
+# stripped. Detection by attempted use is the same argument VMM-002 rests on when
+# it probes with aa-exec instead of reading the profile set.
+#
+# This must test OUTPUT, never exit status: journalctl exits 0 while printing
+# "-- No entries --". Phase 1 already shipped that exact bug in the other
+# direction -- a dmesg pipeline that returned tail's status and reported "no
+# denials" from a log it never read.
+journal_probe() {
+    command -v journalctl >/dev/null 2>&1 || {
+        DENIALS_WHY="journalctl not present on this host"; return 1; }
+    if [ -z "$(journalctl -q -k -n1 --no-pager -o short 2>/dev/null \
+               | grep -vE '^--|^[[:space:]]*$' | head -1)" ]; then
+        DENIALS_WHY="journal kernel read unavailable (live probe returned no records)"
+        return 1
+    fi
+    return 0
+}
+
+capture_denial_anchor() {
+    # Epoch, not a formatted date: --since "@<epoch>" is unambiguous, where a
+    # formatted string is read as local time and would skew by the UTC offset.
+    # One-second granularity over-includes rather than under-includes, which is
+    # the safe direction for a denial count.
+    DENIAL_SINCE=$(date +%s)
+    # --show-cursor works unprivileged even when -k returns nothing, so the anchor
+    # survives an unprovisioned host; only the READ is gated.
+    DENIAL_CURSOR=$(journalctl -q -n0 --show-cursor 2>/dev/null \
+                    | sed -n 's/^-- cursor: //p' | head -1)
+    if [ -n "$DENIAL_CURSOR" ]; then DENIAL_ANCHOR=cursor
+    else DENIAL_ANCHOR=timestamp; fi
+}
+
+# Kernel records since the anchor. AppArmor denials arrive as transport=kernel.
+denial_window() {
+    if [ "$DENIAL_ANCHOR" = cursor ]; then
+        journalctl -q -k --no-pager -o short --after-cursor "$DENIAL_CURSOR" 2>/dev/null
+    else
+        journalctl -q -k --no-pager -o short --since "@$DENIAL_SINCE" 2>/dev/null
+    fi
+}
+
+# journald's rate-limit notice is emitted by journald itself, NOT with
+# transport=kernel, so -k would filter out the very record that says the count is
+# short. Same window, no -k.
+suppression_window() {
+    if [ "$DENIAL_ANCHOR" = cursor ]; then
+        journalctl -q --no-pager -o short --after-cursor "$DENIAL_CURSOR" 2>/dev/null
+    else
+        journalctl -q --no-pager -o short --since "@$DENIAL_SINCE" 2>/dev/null
+    fi
+}
+
+json_str() { sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\r//g' -e 's/\t/ /g'; }
+
+# Appends the denials block to a RUN.json the prober has already written. It has
+# to be post-run -- record_launch_state races the VM by design and finishes while
+# the guest is still alive, so it cannot know what the run went on to be denied.
+DENIAL_RECORD_CAP=50
+record_denials() {
+    # Split deliberately: bash expands every word of a `local` command BEFORE
+    # assigning any of them, so "$out.denials" on this line would expand `out`
+    # while it is still unbound -- fatal under set -u, and NOT catchable by the
+    # `|| say ...` at the call site, which aborted a whole run mid-cleanup.
+    local out="$1"
+    local n=0 supp=false raw=""
+    local tmp="$out.denials"
+
+    if [ "$DENIALS_OK" -eq 0 ]; then
+        DENIAL_JSON=$(printf '  "denials": {\n    "checked": false,\n    "anchor": "%s",\n    "reason": "%s"\n  }' \
+                      "$DENIAL_ANCHOR" "$(printf '%s' "$DENIALS_WHY" | json_str)")
+    else
+        # Match both markers. profile= is a prefix test because a child profile
+        # appears as ironveil-qemu//something.
+        raw=$(denial_window | grep 'apparmor="DENIED"' | grep 'profile="ironveil-qemu' || true)
+        n=$(printf '%s' "$raw" | grep -c . || true)
+        if suppression_window | grep -qE 'Suppressed [0-9]+ messages'; then
+            supp=true
+        fi
+        local recs=""
+        if [ "$n" -gt 0 ]; then
+            recs=$(printf '%s' "$raw" | head -n "$DENIAL_RECORD_CAP" | json_str \
+                   | sed -e 's/^/      "/' -e 's/$/",/' | sed '$ s/,$//')
+            recs=$(printf '\n%s\n    ' "$recs")
+        fi
+        DENIAL_JSON=$(printf '  "denials": {\n    "checked": true,\n    "anchor": "%s",\n    "count": %s,\n    "suppressed": %s,\n    "recorded": %s,\n    "records": [%s]\n  }' \
+                      "$DENIAL_ANCHOR" "$n" "$supp" \
+                      "$([ "$n" -gt "$DENIAL_RECORD_CAP" ] && echo "$DENIAL_RECORD_CAP" || echo "$n")" \
+                      "$recs")
+    fi
+
+    # Splice in textually rather than reserialising, so the record keeps the shape
+    # record_launch_state authored. Temp + mv + chmod is the same atomic pattern
+    # the prober and the receiver's manifest already use.
+    if [ -r "$out" ]; then
+        head -n -1 "$out" > "$tmp" 2>/dev/null || return 1
+        sed -i '$ s/$/,/' "$tmp"
+        printf '%s\n}\n' "$DENIAL_JSON" >> "$tmp"
+    else
+        printf '{\n  "run_id": "%s",\n  "observed": false,\n%s\n}\n' \
+               "$RUN_ID" "$DENIAL_JSON" > "$tmp"
+    fi
+    chmod 0600 "$out" 2>/dev/null || true
+    mv "$tmp" "$out" && chmod 0400 "$out"
+}
+
+# Probed here, with the other preconditions, so an operator who has not granted
+# journal access learns it before the run rather than from RUN.json afterwards.
+if journal_probe; then
+    DENIALS_OK=1
+else
+    say "AUD-004 WARNING: cannot read AppArmor denials for this run"
+    say "                 $DENIALS_WHY"
+    say "                 the run will proceed and record denials.checked=false."
+    say "                 grant it once:  sudo usermod -aG systemd-journal $(id -un)"
+    say "                 then LOG OUT AND BACK IN (groups are fixed at login),"
+    say "                 and confirm with:  journalctl -k -n1"
+fi
+
 # -------------------------------------------------------------- run scaffold --
 RUNBASE="${XDG_RUNTIME_DIR:-/tmp}/ironveil"
 mkdir -p "$RUNBASE"; chmod 0700 "$RUNBASE"
@@ -459,6 +600,9 @@ SCOPE=(systemd-run --user --scope --quiet
 
 say "launching: ${MEM_MB}MB / ${CPUS} vcpu / ${CPU_QUOTA}% cpu / ${TIMEOUT}s wall clock"
 
+# Anchored as late as possible before QEMU starts, so the window is the run's own.
+capture_denial_anchor
+
 record_launch_state "$QUARANTINE/RUN.json" &
 PROBE_PID=$!
 
@@ -487,6 +631,28 @@ if [ -r "$QUARANTINE/RUN.json" ]; then
                                         "$QUARANTINE/RUN.json")"
 else
     say "WARNING: launch state was not recorded for this run"
+fi
+
+# AUD-004. QEMU is dead by now -- the timeout above returned -- so the window
+# between the anchor and here is exactly this run's. Reading it any earlier would
+# race the denials it exists to find.
+record_denials "$QUARANTINE/RUN.json" || say "WARNING: could not record denials"
+if [ "$DENIALS_OK" -eq 0 ]; then
+    say "AUD-004: denial checking was UNAVAILABLE; recorded as checked=false"
+else
+    DN=$(sed -n 's/.*"count": \([0-9]*\).*/\1/p' "$QUARANTINE/RUN.json" | head -1)
+    DS=$(sed -n 's/.*"suppressed": \([a-z]*\).*/\1/p' "$QUARANTINE/RUN.json" | head -1)
+    if [ "${DN:-0}" -gt 0 ]; then
+        say "AUD-004 WARNING: the confinement profile DENIED ${DN} operation(s) this run."
+        say "                 A denial that costs nothing visible is how the NUMA probe"
+        say "                 went unnoticed for eight runs. Treat it as a profile bug"
+        say "                 until proven otherwise; the records are in RUN.json."
+    elif [ "$DS" = true ]; then
+        say "AUD-004 WARNING: journald suppressed messages in this run's window, so a"
+        say "                 denial count of ${DN:-0} is a LOWER BOUND, not a total."
+    else
+        say "AUD-004: no MAC denials during this run (checked)"
+    fi
 fi
 
 RRC=0

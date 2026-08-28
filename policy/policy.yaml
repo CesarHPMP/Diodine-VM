@@ -374,6 +374,62 @@ policy:
           was being collected the whole time -- the cgroup limits in RUN.json,
           the PCI enumeration in probe.txt -- and simply never read.
 
+  - id: AUD-004
+    claim: Every run records whether MAC denial checking was available to it, and
+           when it was, every denial the VMM's confinement profile produced during
+           that run.
+    enforced_by: ironveil-run anchors a journal position before launch and reads
+                 the window back after the VMM has exited, matching records
+                 carrying both apparmor="DENIED" and profile="ironveil-qemu".
+                 Availability is decided by a live read, never by group
+                 membership. The result lands in the run's RUN.json as a denials
+                 block; when the read is unavailable that block says
+                 checked=false and gives the reason
+    verify: RUN.json carries a denials block; tests/run-checks FAILS when it reads
+            checked=false rather than skipping; the counter is driven positive by
+            aa-exec -p ironveil-qemu -- /bin/cat /etc/hostname, which is refused by
+            the real profile and needs no privilege, and driven negative by a
+            window containing no denial, which must report count 0 and not
+            checked=false
+    status: enforced
+    note: |
+      The claim is about RECORDING, not about checking, and that is deliberate. A
+      host can be blind -- reading the kernel audit log needs a privilege TCB-001
+      forbids this launcher -- so a claim that denials are always checked would be
+      unsatisfiable, the same defect VMM-002 had when its detection required root.
+      What can always be true is that the run says which of the two it was.
+
+      Who tolerates the gap is the whole design. The launcher records and keeps
+      running, the way QUAR-001 warns rather than refusing: journal access is a
+      host-wide condition Ironveil cannot fix, and refusing every run on an
+      unprovisioned host would not make any run safer. tests/run-checks does NOT
+      tolerate it and fails, because a suite reporting all-green while blind to
+      denials is the exact reassuring-failure shape Phase 1 kept finding in its
+      own instruments.
+
+      Motivated by the NUMA denial. The profile denied qemu's readdir of
+      /sys/devices/system/node/ on EVERY confined run. It was non-fatal, cost
+      nothing visible, and 26/26 checks passed twice while it fired. A check that
+      failed a run producing any denial would have caught it on day one.
+
+      Detection must NOT read group membership. Supplementary groups are fixed at
+      login, so `id -Gn | grep systemd-journal` reports success in a fresh session,
+      failure in a stale one that has not logged out since provisioning, and
+      success on a host whose journal ACL has been stripped. It must also test
+      journalctl's OUTPUT and never its exit status: journalctl exits 0 while
+      printing "-- No entries --", and Phase 1 already shipped that bug in the
+      other direction with a dmesg pipeline that returned tail's exit status and
+      reported "no denials" from a log it never read.
+
+      journald rate-limits at 10000 messages per 30s by default, so a denial storm
+      can be dropped. The run reads journald's own "Suppressed N messages" record
+      from the same window and reports the count as a LOWER BOUND when it appears
+      -- an upper bound with no lower bound is how a dead test passes.
+
+      Host-provisioned, like VMM-002's profile: sudo usermod -aG systemd-journal,
+      then log out and back in. policy/apparmor/install prints both steps, since it
+      is already the one place an operator is told to provision the host.
+
   - id: VMM-001
     claim: The VMM process runs unprivileged and under a seccomp sandbox.
     enforced_by: no sudo anywhere in the launcher; qemu -sandbox on with

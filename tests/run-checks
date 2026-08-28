@@ -486,5 +486,107 @@ else
     bad "AUD-003" "an orphan check id went unreported"
 fi
 
+# ============================================ MAC denial visibility (AUD-004)
+head_ "M. MAC denial visibility (AUD-004)"
+# The NUMA denial fired on every confined run while 26/26 checks passed twice.
+# These checks exist so that cannot happen again -- which means they have to be
+# able to FAIL, and both directions are driven below rather than waited for.
+
+DJ() { sed -n "s/.*\"$1\": \"\{0,1\}\([^\",]*\)\"\{0,1\},\{0,1\}.*/\1/p" "$2" | head -1; }
+
+DRUN="$PROBE/RUN.json"
+if [ ! -r "$DRUN" ]; then
+    bad "AUD-004" "the probe run recorded no RUN.json to carry a denials block"
+elif ! grep -q '"denials"' "$DRUN"; then
+    bad "AUD-004" "run recorded no denials block at all"
+else
+    ok "AUD-004" "run records whether its confinement refused anything"
+
+    # The chosen tolerance policy, and the whole point of the workstream. The
+    # LAUNCHER may be blind and say so; this SUITE may not. A harness that skips
+    # here would report all-green while nothing was looked at, which is the exact
+    # shape Phase 1 kept finding in its own instruments.
+    if [ "$(DJ checked "$DRUN")" != "true" ]; then
+        bad "AUD-004" "denial checking unavailable -- this suite is BLIND. $(DJ reason "$DRUN")"
+        bad "AUD-004" "cannot drive the counter positive: suite is blind"
+        bad "AUD-004" "cannot drive the counter negative: suite is blind"
+    else
+        ok "AUD-004" "denial checking was available and was performed"
+
+        # --- driven positive -------------------------------------------------
+        # A denial counter that has never counted a denial is not evidence. Drive
+        # a REAL one against the REAL profile: aa-exec transitions into
+        # ironveil-qemu, which does not grant /etc/hostname, so the open is
+        # refused. No root, no profile edit, no test hook in the product.
+        DLOG="$TMP/driven.log"
+        ./bin/ironveil-run --timeout 45 > "$DLOG" 2>&1 &
+        DPID=$!
+        DDIR=""
+        for _ in $(seq 200); do
+            DDIR=$(sed -n 's/.*starting receiver (quarantine: \(quarantine\/[^)]*\)).*/\1/p' \
+                   "$DLOG" 2>/dev/null | head -1)
+            [ -n "$DDIR" ] && break
+            sleep 0.1
+        done
+        # RUN.json existing is a happens-after signal for the anchor: the prober
+        # that writes it is started immediately AFTER capture_denial_anchor, so
+        # firing once it exists cannot race the window open.
+        DREADY=0
+        if [ -n "$DDIR" ]; then
+            for _ in $(seq 300); do
+                [ -r "$DDIR/RUN.json" ] && { DREADY=1; break; }
+                kill -0 $DPID 2>/dev/null || break
+                sleep 0.1
+            done
+        fi
+        if [ "$DREADY" -eq 1 ]; then
+            # Assert the driver itself actually fires. A refusal that silently
+            # succeeded would make the count-zero result below meaningless.
+            if aa-exec -p ironveil-qemu -- /bin/cat /etc/hostname >/dev/null 2>&1; then
+                bad "AUD-004" "driver did not provoke a denial: the profile permitted /etc/hostname"
+            else
+                ok "AUD-004" "driver provoked a real refusal against the live profile"
+            fi
+        else
+            bad "AUD-004" "could not open a window to drive a denial into"
+        fi
+        wait $DPID 2>/dev/null
+
+        DN=$(DJ count "$DDIR/RUN.json" 2>/dev/null)
+        if [ "${DN:-0}" -ge 1 ] 2>/dev/null; then
+            ok "AUD-004" "a denial in the run's window is counted (driven, count=$DN)"
+        else
+            bad "AUD-004" "a real denial was NOT counted (count=${DN:-absent}); the counter cannot fire"
+        fi
+
+        # --- driven negative -------------------------------------------------
+        # "Nothing happened" and "nothing was looked at" must not read alike --
+        # the same distinction AUD-001 already draws between unknown and
+        # unconfined. A clean run must report count 0 AND checked true.
+        CLOG="$TMP/clean.log"
+        ./bin/ironveil-run --timeout 45 > "$CLOG" 2>&1
+        CDIR=$(ls -td quarantine/*/ | head -1)
+        CN=$(DJ count "$CDIR/RUN.json")
+        CC=$(DJ checked "$CDIR/RUN.json")
+        if [ "$CC" != "true" ]; then
+            bad "AUD-004" "clean run reported checked=$CC rather than measuring"
+        elif [ "${CN:-x}" = "0" ]; then
+            ok "AUD-004" "a run with no denial reports 0, not 'unavailable'"
+        else
+            # Not a harness bug. The profile is refusing something on an ordinary
+            # confined run, which is precisely what this workstream exists to
+            # surface -- see the records in that RUN.json.
+            bad "AUD-004" "ordinary confined run produced ${CN} denial(s); the profile is refusing something"
+        fi
+
+        # Suppression must be reported as a lower bound, never as a total.
+        if grep -q '"suppressed"' "$CDIR/RUN.json"; then
+            ok "AUD-004" "the record states whether journald dropped messages"
+        else
+            bad "AUD-004" "no suppression field; a rate-limited count would read as a total"
+        fi
+    fi
+fi
+
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
