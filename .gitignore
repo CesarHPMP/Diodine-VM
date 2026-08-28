@@ -11,3 +11,8 @@ image/base/
 
 # Test tooling build artifacts (source is committed, binaries are not).
 tests/out002/probe
+
+# Byte-compiled Python. The scripts here have no .py suffix and are run
+# directly, so these only ever appear when something imports or compiles them.
+__pycache__/
+*.pyc
