@@ -29,6 +29,15 @@ corpus of must-deny cases while being unusable, so the must-allow half asserts t
 VMM can still reach what it needs to boot. A corpus of only must-deny cases is
 also how you fail to notice you have broken the product.
 
+The profile is not the only host-side control on this boundary. AUD-005 has the
+launcher copy the guest console out of the VMM's run dir into quarantine, and that
+copy -- run unconfined -- is a confused-deputy target: a compromised VMM can swap
+its console file for a symlink at a host secret the profile forbade it to read.
+So a second phase (promotion_probe) drives the real bin/diodine-promote-console
+helper with that attack and with an honest file, asserting the secret is never
+dereferenced and an honest console still promotes. It runs the actual helper, not
+a copy of its logic, so the test and the code cannot drift.
+
 Requires the profile LOADED (sudo policy/apparmor/install), like the exhaustion
 corpus requires KVM. It is not in the CI subset for that reason.
 """
@@ -144,6 +153,70 @@ def run(c):
     return got == c.want, got
 
 
+def promotion_probe():
+    """The boundary's OTHER host-side control: the console-promotion helper.
+
+    The profile denies the VMM every host secret directly. AUD-005 then made the
+    launcher copy the guest console out of the VMM's run dir into quarantine --
+    and that copy, run unconfined, is a confused deputy. QEMU has rw on its run
+    dir, so a compromised VMM can replace the console file with a SYMLINK at a
+    host secret the profile forbade it to read, and a naive copy would dereference
+    it on the VMM's behalf: the launcher reading, with its own access, exactly what
+    the profile's deny was there to stop. This exercises the real helper, not a
+    copy of its logic, so the two cannot drift.
+
+    Two-sided like the profile probe: a symlink must be refused with the secret
+    never dereferenced, and an honest regular file must still be promoted.
+    Returns the number of failures and prints each verdict.
+    """
+    helper = os.path.join(ROOT, "bin", "diodine-promote-console")
+    if not os.access(helper, os.X_OK):
+        print("  \033[31mFAIL\033[0m  AUD-005  diodine-promote-console missing "
+              "or not executable")
+        return 1
+
+    print("\n\033[1mpromotion path: bin/diodine-promote-console as a confused "
+          "deputy\033[0m")
+    fails = 0
+    work = tempfile.mkdtemp(prefix="PROMOTE-PROBE.", dir="quarantine")
+    try:
+        secret = os.path.join(work, "host-secret")
+        marker = "HOST-SECRET-MUST-NEVER-REACH-QUARANTINE"
+        with open(secret, "w") as fh:
+            fh.write(marker + "\n")
+
+        # --- must REFUSE: a symlink standing in for the console -------------
+        link = os.path.join(work, "run-console.symlink")
+        os.symlink(secret, link)
+        dst = os.path.join(work, "promoted.symlink")
+        rc = subprocess.run([helper, link, dst]).returncode
+        leaked = os.path.exists(dst) and marker in open(dst).read()
+        if rc != 0 and not leaked:
+            print("  \033[32mPASS\033[0m  AUD-005  promote/refuse-symlink")
+        else:
+            print(f"  \033[31mFAIL\033[0m  AUD-005  promote/refuse-symlink "
+                  f"-- rc={rc}, secret {'LEAKED' if leaked else 'not leaked'}")
+            fails += 1
+
+        # --- must ALLOW: an honest regular console --------------------------
+        good = os.path.join(work, "run-console.real")
+        with open(good, "w") as fh:
+            fh.write("[diodine-guest] real console line\n")
+        dst2 = os.path.join(work, "promoted.real")
+        rc = subprocess.run([helper, good, dst2]).returncode
+        promoted = os.path.exists(dst2) and \
+            open(dst2).read() == open(good).read()
+        if rc == 0 and promoted:
+            print("  \033[32mPASS\033[0m  AUD-005  promote/allow-regular-file")
+        else:
+            print(f"  \033[31mFAIL\033[0m  AUD-005  promote/allow-regular-file "
+                  f"-- rc={rc}, promoted={promoted}")
+            fails += 1
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return fails
+
+
 def main():
     if shutil.which("aa-exec") is None:
         print("aa-exec not present; cannot probe the profile", file=sys.stderr)
@@ -201,7 +274,11 @@ def main():
         if os.path.exists(junk):
             (shutil.rmtree if os.path.isdir(junk) else os.unlink)(junk)
 
-    print(f"\n{len(cases) - failed} passed, {failed} failed")
+    # The second host-side control on the same boundary: the promotion helper.
+    total = len(cases) + 2
+    failed += promotion_probe()
+
+    print(f"\n{total - failed} passed, {failed} failed")
     if notes:
         print("\n\033[1mwhat the failures mean:\033[0m")
         for cid, n in notes:

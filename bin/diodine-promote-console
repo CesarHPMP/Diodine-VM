@@ -1,0 +1,64 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 César Henrique Policarpo de Melo
+# diodine-promote-console SRC DST -- copy the guest console into quarantine
+# without being made a confused deputy (AUD-005).
+#
+# AUD-005 moved the console out of the VMM's write reach: QEMU writes it to the
+# ephemeral per-run dir under /run, and this helper -- run by the unconfined
+# launcher after QEMU has exited -- copies it into the persistent quarantine tree
+# at 0400. That copy is the whole point of attack. QEMU has rw on its run dir, so
+# a compromised VMM can UNLINK the console file it created and drop a SYMLINK in
+# its place, pointing at a host file the profile forbade it to read (~/.ssh/id_rsa,
+# /etc/shadow, anything). A naive `cp` follows that symlink and copies the
+# secret's contents into the record -- the launcher reading, on the VMM's behalf,
+# exactly what the profile's `deny` was there to stop. The VMM never touched the
+# secret; it borrowed our credentials to do it.
+#
+# So SRC is treated as hostile. It is promoted ONLY if it is a regular file that
+# is not a symlink and has a single hard link (a hardlink to a secret is blocked
+# by EXDEV across filesystems and by the profile's path scope, but nlink==1 costs
+# nothing and closes the door regardless). QEMU has exited by the time this runs,
+# so there is no live process to win a symlink race between the check and the copy.
+#
+# A refused promotion is not silence: DST is written with a marker so the tamper
+# is visible in the run's own record, the same way AUD-004 records a denial rather
+# than dropping it. Exit status: 0 promoted, 3 refused-as-tampered, 4 no console,
+# 2 misuse.
+
+set -u
+
+SRC="${1:?usage: diodine-promote-console SRC DST}"
+DST="${2:?usage: diodine-promote-console SRC DST}"
+
+seal() { chmod 0400 "$DST" 2>/dev/null || true; }
+
+# Nothing to promote is a normal outcome (a run that produced no console at all).
+if [ ! -e "$SRC" ] && [ ! -L "$SRC" ]; then
+    exit 4
+fi
+
+# A symlink where QEMU's chardev only ever creates a regular file is tampering,
+# full stop. Refuse, and record why in the console's place.
+if [ -L "$SRC" ]; then
+    printf 'console withheld: run-dir console.log was a symlink, not a file -- a compromised VMM tried to redirect this copy at a host path (AUD-005). Nothing was dereferenced.\n' \
+        > "$DST" 2>/dev/null || true
+    seal
+    exit 3
+fi
+
+# Not a symlink, but still verify it is a plain regular file with one link before
+# we read it. A directory, device, fifo, or multiply-linked inode here is not
+# something the console backend produces.
+if [ ! -f "$SRC" ] || [ "$(stat -c %h "$SRC" 2>/dev/null || echo 0)" != "1" ]; then
+    printf 'console withheld: run-dir console.log was not a single-link regular file (AUD-005). Nothing was dereferenced.\n' \
+        > "$DST" 2>/dev/null || true
+    seal
+    exit 3
+fi
+
+# Safe: a regular, single-link file. Copy it as itself (-- guards the fixed paths,
+# no -f semantics that would matter since QEMU is gone).
+cp -- "$SRC" "$DST" 2>/dev/null || { rm -f "$DST" 2>/dev/null; exit 1; }
+seal
+exit 0

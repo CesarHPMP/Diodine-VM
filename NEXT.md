@@ -9,7 +9,7 @@ and what has to be true before live samples are allowed anywhere near it.
 | workstream | status |
 | --- | --- |
 | **W1** denial visibility | **done** — `AUD-004`. Journal-anchored, unprivileged, availability decided by live read. The launcher records; `tests/run-checks` fails when blind. |
-| **W2** adversarial suite | **done** — `tests/adversarial/`, 89 cases: framing, ingest, exhaustion, and confinement. Found `ING-003`, `OUT-004`, `AUD-005`, and corrected `RES-003`. |
+| **W2** adversarial suite | **done** — `tests/adversarial/`, 91 cases: framing, ingest, exhaustion, and confinement. Found `ING-003`, `OUT-004`, `AUD-005` (and its confused-deputy tail), and corrected `RES-003`. |
 | **W3** `RES-007` | **decided** — console stays uncapped; `policy.yaml` carries the reasoning, and it is no longer filed as a gap. |
 | W4 `OUT-002` deeper | deferred → `BACKLOG.md` |
 | W5 portability | deferred → `BACKLOG.md`. Host provenance now lands in `RUN.json` so existing numbers stay attributable. |
@@ -227,9 +227,10 @@ sidesteps this by driving the receiver directly, which covers the parsing surfac
 what an in-VM version would add is the *guest-side* emitter's behaviour, and that
 confound has to be solved first.
 
-**The hypervisor boundary, host half.** `tests/adversarial/confinement` — 21
-cases attacking the AppArmor profile directly with `aa-exec -p diodine-qemu`,
-each case what a compromised QEMU would try. The containment claim has two links:
+**The hypervisor boundary, host half.** `tests/adversarial/confinement` — 23
+cases: 21 attacking the AppArmor profile directly with `aa-exec -p diodine-qemu`
+and 2 driving the console-promotion helper (below), each case what a compromised
+QEMU would try. The containment claim has two links:
 guest → QEMU needs a hypervisor 0-day and is inherited platform risk, out of
 scope; QEMU → host is entirely this profile's job, and nothing had tested it. The
 corpus is two-sided — 17 host-sensitive reads/writes that must be refused, 4 the
@@ -254,6 +255,20 @@ exits — the same host-authored pattern `MANIFEST.json` follows. The VMM now ha
 no write path into the persistent tree at all, so there is no glob to get wrong.
 `RES-007` is unaffected: still `-chardev file`, still non-blocking, only the
 destination changed.
+
+**That fix had its own tail**, found by attacking it in turn. Moving the console
+copy into the unconfined launcher made it a *confused deputy*: QEMU has `rw` on
+its run dir, so a compromised VMM can unlink the console file and drop a symlink
+at a host secret the profile forbade it to read — and a naive `cp` would
+dereference it, reading with the launcher's access exactly what the profile's
+`deny` existed to stop. The copy now goes through `bin/diodine-promote-console`,
+which promotes only a plain single-link regular file (QEMU has exited by then, so
+no symlink race), refuses anything else, and records the refusal in the console's
+place. The corpus drives the real helper — not a copy of its logic — with a
+symlink at a secret and with an honest file, and it was demonstrated failing
+against a naive `cp` first (`secret LEAKED`). The hardlink variant was already
+blocked by EXDEV and the profile's path scope; the single-link check closes it
+regardless.
 
 Building it reproduced the Phase 1 lesson once more. The first version wrapped
 each probe in `sh -c "..."`, but `aa-exec`'s entry exec is exempt while the shell
