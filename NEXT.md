@@ -9,7 +9,7 @@ and what has to be true before live samples are allowed anywhere near it.
 | workstream | status |
 | --- | --- |
 | **W1** denial visibility | **done** — `AUD-004`. Journal-anchored, unprivileged, availability decided by live read. The launcher records; `tests/run-checks` fails when blind. |
-| **W2** adversarial suite | **done** — `tests/adversarial/`, 87 cases: framing, ingest, exhaustion, and confinement. Found `ING-003`, `OUT-004`, `AUD-005`, and corrected `RES-003`. |
+| **W2** adversarial suite | **done** — `tests/adversarial/`, 89 cases: framing, ingest, exhaustion, and confinement. Found `ING-003`, `OUT-004`, `AUD-005`, and corrected `RES-003`. |
 | **W3** `RES-007` | **decided** — console stays uncapped; `policy.yaml` carries the reasoning, and it is no longer filed as a gap. |
 | W4 `OUT-002` deeper | deferred → `BACKLOG.md` |
 | W5 portability | deferred → `BACKLOG.md`. Host provenance now lands in `RUN.json` so existing numbers stay attributable. |
@@ -227,14 +227,18 @@ sidesteps this by driving the receiver directly, which covers the parsing surfac
 what an in-VM version would add is the *guest-side* emitter's behaviour, and that
 confound has to be solved first.
 
-**The hypervisor boundary, host half.** `tests/adversarial/confinement` — 19
+**The hypervisor boundary, host half.** `tests/adversarial/confinement` — 21
 cases attacking the AppArmor profile directly with `aa-exec -p diodine-qemu`,
 each case what a compromised QEMU would try. The containment claim has two links:
 guest → QEMU needs a hypervisor 0-day and is inherited platform risk, out of
 scope; QEMU → host is entirely this profile's job, and nothing had tested it. The
-corpus is two-sided — 15 host-sensitive reads/writes that must be refused, 4 the
+corpus is two-sided — 17 host-sensitive reads/writes that must be refused, 4 the
 VMM genuinely needs to boot that must be permitted — because a profile that
-denied everything would sweep a must-deny corpus clean while being unusable.
+denied everything would sweep a must-deny corpus clean while being unusable. The
+refused set spans host secrets, the source tree, the base image, other runs'
+records, the network, and other processes: the profile scopes its `@{PROC}/@{pid}`
+grants to QEMU's own pid, so reading pid 1's environ or maps (host secrets, an
+ASLR defeat) must fail, and does.
 
 It found `AUD-005`. The profile granted `owner @DIODINE_ROOT@/quarantine/**/console.log w`
 so QEMU could append its own console, but that glob spans *every* run, not the

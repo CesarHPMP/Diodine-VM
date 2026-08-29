@@ -116,6 +116,11 @@ def build(target_run):
 
     # ---- must DENY: reach into processes / the network ---------------------
     A(Case("proc/environ-self", "VMM-001", "deny", read_("/proc/self/environ")))
+    # The @{PROC}/@{pid}/... grants are scoped to QEMU's OWN pid. Reading ANOTHER
+    # process is a different boundary, and pid 1 is always present: its environ is
+    # host secrets and its maps defeat ASLR. Both must be refused.
+    A(Case("proc/environ-init", "VMM-001", "deny", read_("/proc/1/environ")))
+    A(Case("proc/maps-init", "VMM-001", "deny", read_("/proc/1/maps")))
     if shutil.which("bash"):
         # bash AS the entry; /dev/tcp is internal to bash, so no second exec, and
         # the connect is what `deny network` must stop.
