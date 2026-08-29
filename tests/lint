@@ -5,8 +5,10 @@
 #
 # Everything here is checkable WITHOUT a VM, without root, and without the
 # AppArmor profile loaded -- which is precisely the set CI can run. It verifies
-# that the tree parses, builds, and carries its licence, and nothing about
-# whether the boundary holds. tests/run-checks does that, and cannot run here.
+# that the tree parses, builds, carries its licence, and that the confinement
+# profile still compiles, and nothing about whether the boundary holds once
+# loaded. tests/run-checks and tests/adversarial/confinement do that, and cannot
+# run here.
 #
 # Built to the same rule as the rest of Phase 2: every count has a LOWER bound.
 # A glob that silently matches nothing would otherwise sweep clean, which is the
@@ -148,6 +150,35 @@ if [ -z "$DANGLING" ]; then
     ok "DOCS" "every statement id cited in the docs exists in policy.yaml"
 else
     bad "DOCS" "docs cite statements that do not exist: $(echo $DANGLING | tr '\n' ' ')"
+fi
+
+head_ "F. Confinement profile compiles"
+# The profile is the entire VMM->host boundary (VMM-002), but a syntax error in
+# it surfaced nowhere until `sudo policy/apparmor/install` -- root-only, and off
+# the CI path entirely, so a typo could sit on main looking fine. apparmor_parser
+# -Q compiles the profile fully WITHOUT loading it into the kernel, which needs
+# neither root nor the profile to be active, so it belongs here with the rest of
+# what CI can run. @DIODINE_ROOT@ is substituted first (the raw template is not a
+# valid path), and the cache is redirected to a temp dir because the default
+# /var/cache/apparmor is not writable unprivileged.
+PROF_TMPL=policy/apparmor/diodine-qemu.in
+if [ ! -f "$PROF_TMPL" ]; then
+    bad "PROFILE" "profile template missing: $PROF_TMPL"
+elif command -v apparmor_parser >/dev/null 2>&1; then
+    ptmp=$(mktemp); pcache=$(mktemp -d)
+    sed 's|@DIODINE_ROOT@|/nonexistent/diodine-lint|g' "$PROF_TMPL" > "$ptmp"
+    if perr=$(apparmor_parser -Q --cache-loc="$pcache" "$ptmp" 2>&1); then
+        ok "PROFILE" "diodine-qemu.in compiles (apparmor_parser -Q, no kernel load)"
+    else
+        bad "PROFILE" "diodine-qemu.in fails to compile:"
+        printf '%s\n' "$perr" | sed 's/^/           /'
+    fi
+    rm -rf "$ptmp" "$pcache"
+else
+    # Same stance as the gcc check above: a prerequisite absent is a failure to
+    # verify, not a pass. The profile is too central to let its syntax go unchecked
+    # silently.
+    bad "PROFILE" "apparmor_parser absent; the confinement profile was not syntax-checked"
 fi
 
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
