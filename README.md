@@ -132,12 +132,12 @@ charged against a single global budget so a bomb cannot buy room by nesting.
 
 ## What is and is not enforced
 
-Verified by `tests/run-checks` (58 checks): no network interface, no USB, no
+Verified by `tests/run-checks`: no network interface, no USB, no
 graphics, no shared folders, no block device, one sanctioned virtio port, no
 host entropy source, nothing on the PCI bus but the chipset and the one virtio
-device, guest-side readback yields nothing, the memory, swap, CPU and task caps
-read back from the run's own cgroup, export caps enforced mid-stream, wall-clock
-destruction of a non-cooperative guest, base image byte-identical after a run,
+device, guest-side readback yields nothing, export caps enforced mid-stream,
+wall-clock destruction of a non-cooperative guest, base image byte-identical
+after a run,
 ingest refusal of zip bombs, path traversal and symlink members, every run
 recording its own measured confinement state, host records surviving a guest
 that emits artifacts named after them, a run refusing to start at all when the
@@ -145,6 +145,24 @@ confinement profile is missing, the retention and consumer warnings both firing
 when they should and staying quiet when they should not, and — since the harness
 now reads `policy.yaml` — that every statement in it is checked here or exempted
 with its reason (`AUD-003`).
+
+The resource caps are verified separately, by `tests/adversarial/exhaustion`,
+because reading them back from the cgroup was not enough. A configured limit is
+not an enforced one — checking the setting rather than the behaviour is the same
+defect `VMM-002` had when it read the loaded profile set instead of probing with
+`aa-exec`. The corpus applies real pressure from inside the guest and measures the
+run's own cgroup: `memory.peak` 1007–1013 MiB against a 1024 MiB cap with swap at
+zero, 25% of a core sustained against a deliberately low 25% quota, and the export
+caps refused mid-stream — plus all three at once. Every case asserts a floor as
+well as a cap, since "stayed under the limit" is trivially true of a guest that
+did nothing.
+
+That corpus also corrected a claim. `RES-003` read "Guest process count is
+capped", enforced by `TasksMax`. It is not: `TasksMax` governs the host scope
+holding QEMU, and guest processes are created by the guest kernel and never appear
+in it. A guest forking 300 times leaves the host counter at `pids.peak` 4 against
+a cap of 64 — unchanged from idle. The statement now says what is true, and the
+real host-side property (a runaway VMM cannot exhaust host PIDs) is unaffected.
 
 Known gaps, all recorded in `policy/policy.yaml`:
 

@@ -496,7 +496,13 @@ Concretely:
 - quarantine directory with a filesystem quota, excluded from indexers, thumbnailers, AV, and backups
 - ingest tooling with bounded decompression (ratio cap, absolute cap, depth cap)
 
-### Phase 2 — Adversarial Testing
+### Phase 2 — Adversarial Testing — **in progress**
+
+Tracked operationally in `NEXT.md`, with everything deliberately deferred recorded
+in `BACKLOG.md`. Built so far: `tests/adversarial/` (framing, ingest and
+exhaustion corpora) and `tests/enumerate-paths`. The live-sample gate in
+`BACKLOG.md` is the authority on what is still outstanding — the section below is
+the original plan, kept for the surfaces it enumerates.
 
 Build deliberately hostile test workloads (synthetic, not live malware, at this stage). Attempt to violate policy through:
 

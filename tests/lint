@@ -123,5 +123,32 @@ else
     bad "LICENSE" "LICENSE is missing or is not the GPL v3 text"
 fi
 
+head_ "E. Documentation references"
+# The docs cite policy statements by id. A renamed or deleted statement leaves a
+# reference that still reads authoritative and points at nothing -- and unlike a
+# stale count, a reader cannot tell by looking. This is why the check tallies were
+# taken OUT of README rather than re-pinned: a number in prose that nothing
+# verifies will drift, so either something checks it or it should not be there.
+DOCS="README.md NEXT.md BACKLOG.md SECURITY.md diodine.md"
+policy_ids_lint() { grep -oE '^  - id: [A-Z][A-Z0-9]*-[0-9]{3}' policy/policy.yaml \
+                     | grep -oE '[A-Z][A-Z0-9]*-[0-9]{3}' | sort -u; }
+doc_ids_lint()    { grep -ohE '`[A-Z][A-Z0-9]*-[0-9]{3}`' $DOCS 2>/dev/null \
+                     | tr -d '`' | sort -u; }
+
+NPOL=$(policy_ids_lint | wc -l)
+NDOC=$(doc_ids_lint | wc -l)
+if [ "$NPOL" -ge 20 ] && [ "$NDOC" -ge 10 ]; then
+    ok "DOCS" "$NDOC statement ids cited across the docs, $NPOL defined in policy"
+else
+    bad "DOCS" "parsed $NPOL policy ids and $NDOC doc ids; this check is vacuous"
+fi
+
+DANGLING=$(comm -13 <(policy_ids_lint) <(doc_ids_lint))
+if [ -z "$DANGLING" ]; then
+    ok "DOCS" "every statement id cited in the docs exists in policy.yaml"
+else
+    bad "DOCS" "docs cite statements that do not exist: $(echo $DANGLING | tr '\n' ' ')"
+fi
+
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

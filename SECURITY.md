@@ -48,7 +48,8 @@ Concretely, that includes:
 - Escaping `diodine-ingest`'s destination directory, or defeating its bounds
   (`ING-001`, `ING-002`).
 - Forging, replacing, or suppressing a host-authored record of a run
-  (`AUD-002`, `AUD-004`), or defeating expansion attribution (`ING-003`).
+  (`AUD-002`, `AUD-004`, `OUT-004`), or defeating expansion attribution
+  (`ING-003`).
 - Escaping or evading the resource caps (`RES-001`…`RES-006`).
 - Defeating the VMM confinement profile, or making a run report itself confined
   when it was not (`VMM-002`, `AUD-001`).
@@ -73,6 +74,11 @@ These are documented, not overlooked. Reporting them tells us nothing new:
   bound, and the status says `not-enforced`.
 - **`QUAR-001`** — quarantine exclusion markers are advisory. Diodine cannot make
   a third-party indexer honour them.
+- **`RES-003`, guest process count.** A guest can fork as much as its own RAM
+  allows. `TasksMax` bounds the *host* scope holding QEMU, not processes inside
+  the guest kernel — a guest forking 300 times leaves `pids.peak` at 4. This is
+  measured and stated in the policy; the bound on guest processes is guest RAM,
+  which `RES-001` caps.
 - **Guest-side controls** — the payload runs as root inside the guest by design.
   Nothing it does in there is a security control.
 - **`bin/diodine-ingest` is not a memory-safety boundary.** It parses hostile
