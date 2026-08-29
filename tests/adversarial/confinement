@@ -136,6 +136,20 @@ def build(target_run):
         A(Case("net/open-socket", "NET-002", "deny",
                ["bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/22"]))
 
+    # ---- must DENY: the host kernel itself ---------------------------------
+    # Confidentiality and control of the host kernel, a class apart from any
+    # userspace file. kcore is host RAM; kallsyms and modules defeat KASLR; the
+    # profile grants transparent_hugepage READ-only, so a write there proves the
+    # grant is not accidentally rw; sysrq-trigger is a direct host-control
+    # primitive (a compromised VMM could reboot or OOM the host with one write).
+    A(Case("kernel/read-kcore", "VMM-002", "deny",
+           ["dd", "if=/proc/kcore", "of=/dev/null", "bs=1", "count=1"]))
+    A(Case("kernel/read-kallsyms", "VMM-002", "deny", read_("/proc/kallsyms")))
+    A(Case("kernel/write-thp", "VMM-002", "deny",
+           write_("/sys/kernel/mm/transparent_hugepage/enabled")))
+    A(Case("kernel/write-sysrq", "VMM-002", "deny",
+           write_("/proc/sysrq-trigger")))
+
     # ---- must ALLOW: what the VMM genuinely needs to boot ------------------
     A(Case("need/read-urandom", "DEV-005", "allow",
            ["dd", "if=/dev/urandom", "of=/dev/null", "bs=1", "count=1"]))
@@ -145,6 +159,12 @@ def build(target_run):
            ["dd", "if=image/base/initramfs", "of=/dev/null", "bs=1", "count=1"]))
     A(Case("need/create-own-runtime-dir", "AUD-005", "allow",
            ["mkdir", "-p", f"/run/user/{os.getuid()}/diodine/probe.{os.getpid()}"]))
+    # The read half of kernel/write-thp: QEMU reads this at startup, so the grant
+    # is deliberately r. Pairing it with the write-deny proves the grant is
+    # precisely read-only rather than a path the profile forgot to scope.
+    A(Case("need/read-thp", "VMM-002", "allow",
+           ["dd", "if=/sys/kernel/mm/transparent_hugepage/enabled",
+            "of=/dev/null", "bs=1", "count=1"]))
     return C
 
 
