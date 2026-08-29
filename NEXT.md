@@ -9,7 +9,7 @@ and what has to be true before live samples are allowed anywhere near it.
 | workstream | status |
 | --- | --- |
 | **W1** denial visibility | **done** — `AUD-004`. Journal-anchored, unprivileged, availability decided by live read. The launcher records; `tests/run-checks` fails when blind. |
-| **W2** adversarial suite | **started** — `tests/adversarial/`, 61 cases against the receiver's framing and ingest. Found `ING-003`. Exhaustion and in-VM cases still to come. |
+| **W2** adversarial suite | **done** — `tests/adversarial/`, 68 cases: framing, ingest, and exhaustion. Found `ING-003`, `OUT-004`, and corrected `RES-003`. |
 | **W3** `RES-007` | **decided** — console stays uncapped; `policy.yaml` carries the reasoning, and it is no longer filed as a gap. |
 | W4 `OUT-002` deeper | deferred → `BACKLOG.md` |
 | W5 portability | deferred → `BACKLOG.md`. Host provenance now lands in `RUN.json` so existing numbers stay attributable. |
@@ -185,12 +185,47 @@ partial `os.write` that sent 19 bytes fewer than claimed and did the same; and a
 namespace check that passed against the unfixed code because it tested only one
 of the two plausible directory namings.
 
-**Still to come:** exhaustion (every cap in `RES-001`..`RES-008`, from inside,
-and in combination), and the in-VM cases. Note the confound for anything driven
-through a guest: `guest/init` runs `diodine-send` after the payload returns, so
-a malformed-frame test in a VM is always followed by a second, well-formed sender
-on the same stream. The framing corpus avoids it by driving the receiver
-directly; the exhaustion work cannot, and has to account for it.
+**Exhaustion landed.** `tests/adversarial/exhaustion` — 7 cases driving real VMs
+at the `RES` caps, measuring the run's own transient cgroup while it lives, since
+the scope is destroyed with the run.
+
+It exists because `RES-001`, `-002` and `-003` were each verified by *reading the
+cgroup's configuration* — "read `memory.max` from the run's cgroup". A configured
+limit is not an enforced one, and checking the setting rather than the behaviour
+is the defect `VMM-002` had when it read the loaded profile set instead of probing
+with `aa-exec`.
+
+Measured under real pressure:
+
+| statement | result |
+| --- | --- |
+| `RES-001` | `memory.peak` 1007–1013 MiB against a 1024 MiB cap, `swap.peak` 0 |
+| `RES-002` | 25% of a core sustained against a deliberately low 25% quota |
+| `RES-003` | host `pids.peak` **4**/64 while the guest spawned **300** processes |
+| `RES-006` | total-bytes and count caps both refused mid-stream |
+| combined | 911 MiB + console + export at once, every cap held, swap 0 |
+
+`RES-003` is the finding. The claim read "Guest process count is capped", but
+`TasksMax` governs the host scope holding QEMU — guest processes are created by
+the guest kernel and never appear in it. Verifying by reading `pids.max` confirmed
+only that a limit was configured. The statement now says what is actually true.
+
+Two cases are **controls**: a benign payload run through the pressure checks must
+FAIL them. Without those the floors are untested, and a floor that cannot fire
+turns every case into an upper bound alone — which a guest that did nothing
+satisfies. Same idea as the framing corpus's must-accept half, inverted.
+
+`exhaustion` needs KVM, the loaded profile and cgroup delegation, so CI runs
+`tests/adversarial/run frames ingest` explicitly. Selection is explicit rather
+than auto-detected: a runner that noticed KVM was missing and quietly skipped a
+third of itself would report success for work it never did.
+
+**Still open:** the malformed-frame cases driven through a guest. `guest/init`
+runs `diodine-send` after the payload returns, so an in-VM framing test is always
+followed by a second, well-formed sender on the same stream. The framing corpus
+sidesteps this by driving the receiver directly, which covers the parsing surface;
+what an in-VM version would add is the *guest-side* emitter's behaviour, and that
+confound has to be solved first.
 
 ### W3 — `RES-007`, and the trade-off it forces
 

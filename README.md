@@ -3,11 +3,12 @@
 [![CI](https://github.com/CesarHPMP/Diodine-VM/actions/workflows/ci.yml/badge.svg)](https://github.com/CesarHPMP/Diodine-VM/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
-> The CI badge covers static hygiene and the adversarial corpora. It does **not**
-> run `tests/run-checks` — that needs KVM, a loaded AppArmor profile and journal
-> access, which no hosted runner has. A green badge says the tree is well-formed
-> and the hostile-input corpora pass. It says nothing about whether the boundary
-> holds.
+> The CI badge covers static hygiene and the two host-side corpora. It does **not**
+> run `tests/run-checks` or the exhaustion corpus — both need KVM, a loaded
+> AppArmor profile and cgroup delegation, which no hosted runner has. A green
+> badge says the tree is well-formed and the framing and ingest corpora pass. It
+> says nothing about whether the boundary holds or whether any resource cap is
+> enforced.
 
 A capability-restricted malware analysis environment.
 
@@ -33,7 +34,7 @@ sudo policy/apparmor/install    # once: load the VMM confinement profile
 # (install also sets up AUD-004 denial visibility -- no group, no root daemon)
 ./bin/diodine-run               # boot a disposable VM, run the default probe
 ./tests/run-checks              # verify the boundary is configured as claimed
-./tests/adversarial/run         # hostile inputs against the receiver and ingest
+./tests/adversarial/run         # hostile inputs + resource exhaustion (drives real VMs)
 ./tests/lint                    # static hygiene (no VM needed; this is what CI runs)
 ```
 
@@ -178,7 +179,7 @@ guest/init              guest PID 1
 guest/diodine-send      guest-side artifact emitter
 image/build-base-image  builds the RAM-only Alpine base
 tests/run-checks        verification harness, keyed to policy IDs
-tests/adversarial/      Phase 2 hostile-input suite (frames, ingest)
+tests/adversarial/      hostile inputs: frames, ingest, exhaustion
 tests/lint              static hygiene; the part CI can run
 .github/workflows/      CI and CodeQL
 quarantine/             untrusted output (gitignored)

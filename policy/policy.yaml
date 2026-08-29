@@ -203,20 +203,68 @@ policy:
   - id: RES-001
     claim: Guest memory is capped and never reaches host swap.
     enforced_by: systemd-run --user --scope -p MemoryMax -p MemorySwapMax=0
-    verify: read memory.max and memory.swap.max from the run's cgroup
+    verify: tests/adversarial/exhaustion drives a guest to touch every page it was
+            given and measures the run's own cgroup: memory.peak 1007-1013 MiB
+            against a 1024 MiB memory.max, with memory.swap.peak 0. Reading
+            memory.max alone was the previous verification and confirmed only that
+            a limit had been configured
     status: enforced
+    note: |
+      Measured under pressure rather than read from configuration. The first
+      version of the exhaustion payload peaked at 612 MiB against the 1024 MiB
+      cap and proved nothing: a tmpfs defaults to half of RAM, so writing into the
+      guest's root filesystem stalls near 512 MiB and the host cap is never
+      approached. The payload now mounts a tmpfs sized above guest RAM, so the
+      guest kernel rather than a filesystem is what eventually refuses, and the
+      host limit is the thing actually being tested.
+
+      Demand paging is why an idle guest costs so much less than its allocation:
+      a 1 GiB guest that touches nothing peaks around 145 MiB.
 
   - id: RES-002
     claim: Guest CPU consumption is capped.
     enforced_by: systemd-run --user --scope -p CPUQuota
-    verify: read cpu.max from the run's cgroup
+    verify: tests/adversarial/exhaustion runs a never-yielding guest under a
+            deliberately low --cpu-quota 25 and rates cpu.stat over the window the
+            scope was observed: 25% of a core sustained against a 25% quota
     status: enforced
+    note: The quota is deliberately set BELOW the default for this measurement.
+          At the default 100% a spinning guest sits at the cap either way, so the
+          reading cannot distinguish an enforced quota from an unenforced one.
 
   - id: RES-003
-    claim: Guest process count is capped.
-    enforced_by: systemd-run --user --scope -p TasksMax
-    verify: read pids.max from the run's cgroup
+    claim: The VMM's thread count is capped. Guest process count is NOT capped by
+           this, and is bounded only indirectly, by the guest's own RAM.
+    enforced_by: systemd-run --user --scope -p TasksMax, which governs the host
+                 scope containing QEMU. Processes inside the guest are created by
+                 the guest kernel and never appear in this cgroup
+    verify: tests/adversarial/exhaustion -- a guest spawning 300 processes of its
+            own leaves the host scope at pids.peak 4 against a cap of 64
     status: enforced
+    note: |
+      Reworded after the exhaustion corpus measured it. This previously read
+      "Guest process count is capped", enforced by TasksMax, verified by "read
+      pids.max from the run's cgroup" -- and every part of that except the
+      mechanism was wrong.
+
+      TasksMax bounds the host scope, which contains QEMU and its threads. Guest
+      processes live inside the guest kernel and are invisible to it. A guest
+      that forks 300 times moves the host counter not at all: measured
+      pids.peak 4 against pids.max 64, unchanged from an idle run.
+
+      The old claim was not merely imprecise, it was unfalsifiable in the
+      direction that mattered. Verifying it by reading pids.max checked that a
+      limit had been CONFIGURED, never that it constrained anything -- the same
+      defect VMM-002 had when it read the loaded profile set instead of probing
+      with aa-exec. The reading was always 64 and the claim always looked met.
+
+      What actually bounds guest process count is guest RAM, capped by RES-001,
+      and the guest's own kernel limits. The latter are guest-side and therefore
+      not a security control here, per the standing non-goal: the payload runs as
+      root in the hostile domain by design.
+
+      This is not a weakening. The host-side property -- a runaway VMM cannot
+      exhaust host PIDs -- is real, enforced, and now stated as what it is.
 
   - id: RES-004
     claim: The guest cannot drive unbounded host disk I/O.

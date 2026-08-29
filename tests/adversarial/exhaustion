@@ -1,0 +1,351 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 César Henrique Policarpo de Melo
+"""Exhaustion corpus: every RES cap, attacked from inside the guest.
+
+Why this is separate from tests/run-checks. That harness verifies RES-001, -002
+and -003 by READING the cgroup's configuration -- "read memory.max from the run's
+cgroup". A configured limit is not an enforced one, and checking the setting
+rather than the behaviour is the exact defect VMM-002 had when it read the loaded
+profile set instead of probing with aa-exec: the claim looked verified while
+nothing had ever tested it. This applies pressure and measures what the kernel
+actually did.
+
+Measured, never assumed. Each case reads memory.peak, memory.swap.peak,
+pids.peak and cpu.stat from the run's own transient scope WHILE IT LIVES -- the
+scope is destroyed with the run, so a post-hoc reading is not available. The
+launcher's own prober races the VM for the same reason.
+
+Every assertion is two-sided, per the Phase 2 rule. An upper bound alone is
+satisfied by a guest that did nothing: "memory stayed under the cap" is trivially
+true of a payload that never allocated, and a corpus of those would sweep clean
+against a completely broken cap. So each case also asserts a FLOOR proving the
+pressure was really applied.
+"""
+
+import os
+import re
+import subprocess
+import sys
+import threading
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(HERE))
+os.chdir(ROOT)
+
+MIB = 1024 * 1024
+
+
+def scope_root():
+    return f"/sys/fs/cgroup/user.slice/user-{os.getuid()}.slice"
+
+
+def find_scope(run_id):
+    """The run's transient scope, by name. It exists only while the run does."""
+    for dirpath, dirnames, _ in os.walk(scope_root()):
+        for d in dirnames:
+            if d == f"diodine-{run_id}.scope":
+                return os.path.join(dirpath, d)
+    return None
+
+
+def read_int(path, default=None):
+    try:
+        v = open(path).read().strip().split()[0]
+        return int(v) if v.isdigit() else default
+    except (OSError, IndexError, ValueError):
+        return default
+
+
+class Sampler(threading.Thread):
+    """Polls the run's cgroup for peak usage until the run ends.
+
+    Peaks rather than instantaneous values: a poll loop that happened to miss the
+    moment of maximum pressure would under-report, and under-reporting is the
+    direction that makes a broken cap look enforced.
+    """
+
+    def __init__(self, proc, log_path):
+        super().__init__(daemon=True)
+        self.proc, self.log_path = proc, log_path
+        self.scope = None
+        self.peaks = {}
+        self.samples = 0
+        self.first_seen = None
+        self.last_seen = None
+
+    def run(self):
+        run_id = None
+        while self.proc.poll() is None:
+            if run_id is None:
+                try:
+                    m = re.search(r"quarantine/(\S+?)\)", open(self.log_path).read())
+                    if m:
+                        run_id = m.group(1)
+                except OSError:
+                    pass
+                time.sleep(0.05)
+                continue
+            if self.scope is None:
+                self.scope = find_scope(run_id)
+                if self.scope is None:
+                    time.sleep(0.05)
+                    continue
+            for f in ("memory.peak", "memory.swap.peak", "pids.peak",
+                      "memory.max", "memory.swap.max", "pids.max"):
+                v = read_int(os.path.join(self.scope, f))
+                if v is None:
+                    continue
+                # max/limit values are read once; peaks only ever grow.
+                if f.endswith(".peak"):
+                    self.peaks[f] = max(self.peaks.get(f, 0), v)
+                else:
+                    self.peaks[f] = v
+            usage = None
+            try:
+                for line in open(os.path.join(self.scope, "cpu.stat")):
+                    if line.startswith("usage_usec"):
+                        usage = int(line.split()[1])
+            except OSError:
+                pass
+            if usage is not None:
+                self.peaks["cpu_usage_usec"] = max(self.peaks.get("cpu_usage_usec", 0), usage)
+                # Wall time is measured across the window the scope was actually
+                # observed, not the run's total duration: boot and teardown are
+                # not part of the interval the quota should be judged over.
+                now = time.monotonic()
+                if self.first_seen is None:
+                    self.first_seen = now
+                self.last_seen = now
+            self.samples += 1
+            time.sleep(0.05)
+
+
+class Case:
+    def __init__(self, cid, stmt, payload, args, check, timeout=120,
+                 must_fail=False, why=None):
+        self.cid, self.stmt, self.payload = cid, stmt, payload
+        self.args, self.check, self.timeout = args, check, timeout
+        # must_fail inverts the verdict. These are the control cases: a benign
+        # payload run through a pressure check MUST fail it. Without them the
+        # floors are untested, and a floor that can never fire turns every case
+        # above into an upper bound alone -- which a guest that did nothing
+        # satisfies. The framing corpus carries a must-accept half for exactly
+        # this reason; this is the same idea inverted.
+        self.must_fail, self.why = must_fail, why
+
+
+def run_case(c):
+    log = f"/tmp/diodine-exh-{os.getpid()}-{c.cid.replace('/', '_')}.log"
+    cmd = ["./bin/diodine-run", "--payload", c.payload,
+           "--timeout", str(c.timeout)] + c.args
+    with open(log, "w") as fh:
+        proc = subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT)
+        s = Sampler(proc, log)
+        s.start()
+        try:
+            proc.wait(timeout=c.timeout + 90)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            return False, "run did not finish", {}
+        s.join(timeout=5)
+    if "--cpu-quota" in c.args:
+        s.peaks["cpu_quota_pct"] = int(c.args[c.args.index("--cpu-quota") + 1])
+    else:
+        s.peaks["cpu_quota_pct"] = 100
+    text = open(log).read()
+    os.unlink(log)
+    if s.first_seen and s.last_seen:
+        s.peaks["observed_wall_s"] = s.last_seen - s.first_seen
+    if s.samples == 0:
+        # Distinguish "measured nothing" from "measured zero". A sampler that
+        # never found the scope would otherwise report peaks of 0 and every
+        # upper-bound assertion below would pass.
+        return False, "cgroup was never sampled; this case measured nothing", s.peaks
+    return c.check(s.peaks, text, proc.returncode)
+
+
+def rundir_of(text):
+    m = re.search(r"quarantine: (quarantine/\S+?)\)", text)
+    return m.group(1) if m else None
+
+
+# ---------------------------------------------------------------- the cases --
+
+def check_memory(p, text, rc):
+    mx, peak = p.get("memory.max"), p.get("memory.peak", 0)
+    swap_peak = p.get("memory.swap.peak", 0)
+    if not mx:
+        return False, "memory.max was never read", p
+    if peak > mx:
+        return False, f"memory.peak {peak} exceeded memory.max {mx}", p
+    # Floor: the payload writes far past the guest's RAM, so a run that peaked
+    # low did not apply pressure and proves nothing about the cap.
+    floor = 300 * MIB
+    if peak < floor:
+        return False, (f"only {peak // MIB} MiB peak; pressure was not applied, "
+                       f"so the cap was never tested"), p
+    if swap_peak != 0:
+        return False, f"guest memory reached host swap: swap.peak={swap_peak}", p
+    return True, f"peak {peak // MIB}/{mx // MIB} MiB, swap 0", p
+
+
+def check_forks(p, text, rc):
+    pmax, ppeak = p.get("pids.max"), p.get("pids.peak", 0)
+    if not pmax:
+        return False, "pids.max was never read", p
+    if ppeak > pmax:
+        return False, f"pids.peak {ppeak} exceeded pids.max {pmax}", p
+    d = rundir_of(text)
+    forked = None
+    if d:
+        try:
+            forked = open(f"{d}/artifacts/forks_attempted.txt").read().strip()
+        except OSError:
+            pass
+    if not forked:
+        return False, "the guest never reported forking; pressure not applied", p
+    return True, (f"host pids.peak {ppeak}/{pmax} while the guest spawned {forked} "
+                  f"processes of its own"), p
+
+
+def check_cpu(p, text, rc):
+    """RES-002 under a deliberately LOW quota, so the cap has to do work."""
+    usage = p.get("cpu_usage_usec", 0)
+    wall = p.get("observed_wall_s", 0)
+    quota = p.get("cpu_quota_pct")
+    if not wall or wall < 5:
+        return False, f"scope was observed for only {wall:.1f}s; too short to rate", p
+    if usage == 0:
+        return False, "no CPU time was recorded; the payload did not run", p
+    pct = (usage / 1e6) / wall * 100.0
+    # Floor: spin.sh never yields, so a rate far below the quota means the guest
+    # was not actually burning CPU and the quota was never the binding constraint.
+    if pct < quota * 0.4:
+        return False, (f"only {pct:.0f}% of a core used against a {quota}% quota; "
+                       f"the payload did not apply CPU pressure"), p
+    # Ceiling with slack for sampling granularity and the VMM's own threads.
+    if pct > quota * 1.35 + 10:
+        return False, f"used {pct:.0f}% of a core against a {quota}% quota", p
+    return True, f"{pct:.0f}% of a core sustained against a {quota}% quota", p
+
+
+def check_export(p, text, rc):
+    if "would exceed total cap" not in text and "artifact count cap reached" not in text:
+        return False, "neither the total-bytes nor the count cap was reported", p
+    d = rundir_of(text)
+    if not d:
+        return False, "no run directory in the launcher output", p
+    try:
+        landed = os.listdir(f"{d}/artifacts")
+    except OSError:
+        landed = []
+    total = sum(os.path.getsize(os.path.join(d, "artifacts", f)) for f in landed)
+    if total > 400 * 1024:
+        return False, f"{total} bytes landed, above the 400 KiB cap set for this case", p
+    if not landed:
+        return False, "nothing landed at all; the cap cannot be distinguished from a dead payload", p
+    return True, f"{len(landed)} artifact(s), {total} bytes, refused at the cap", p
+
+
+def check_combo(p, text, rc):
+    mx, peak = p.get("memory.max"), p.get("memory.peak", 0)
+    swap_peak = p.get("memory.swap.peak", 0)
+    pmax, ppeak = p.get("pids.max"), p.get("pids.peak", 0)
+    if not mx or not pmax:
+        return False, "cgroup limits were never read", p
+    for name, got, cap in (("memory", peak, mx), ("pids", ppeak, pmax)):
+        if got > cap:
+            return False, f"{name} exceeded its cap under combined pressure: {got} > {cap}", p
+    if swap_peak != 0:
+        return False, f"swap was used under combined pressure: {swap_peak}", p
+    d = rundir_of(text)
+    console = 0
+    if d:
+        try:
+            console = os.path.getsize(f"{d}/console.log")
+        except OSError:
+            pass
+    # Floors on BOTH pressures, so a case where only one of them ran cannot pass
+    # and be read as "all caps held under combination".
+    if peak < 200 * MIB:
+        return False, f"memory pressure did not materialise ({peak // MIB} MiB)", p
+    if console < 16 * 1024:
+        return False, f"console pressure did not materialise ({console} bytes)", p
+    return True, (f"memory {peak // MIB}/{mx // MIB} MiB, pids {ppeak}/{pmax}, "
+                  f"console {console // 1024} KiB, swap 0"), p
+
+
+CASES = [
+    Case("memory/fill-past-guest-ram", "RES-001",
+         "tests/payloads/mem-bomb.sh", [], check_memory),
+    Case("control/benign-must-not-satisfy-memory", "RES-001",
+         "tests/payloads/probe.sh", [], check_memory, timeout=90,
+         must_fail=True,
+         why="a payload applying no memory pressure must not satisfy the "
+             "memory case; if it does, the floor cannot fire and every "
+             "RES-001 result here is an upper bound with nothing under it"),
+    Case("control/benign-must-not-satisfy-export", "RES-006",
+         "tests/payloads/probe.sh",
+         ["--max-total", "409600", "--max-files", "8"], check_export,
+         timeout=90, must_fail=True,
+         why="a payload that exports almost nothing must not look like a run "
+             "stopped at the export cap"),
+    Case("cpu/spin-under-quarter-quota", "RES-002",
+         "tests/payloads/spin.sh", ["--cpu-quota", "25"], check_cpu, timeout=45),
+    Case("pids/fork-storm-inside-guest", "RES-003",
+         "tests/payloads/fork-bomb.sh", [], check_forks),
+    Case("export/total-and-count-caps", "RES-006",
+         "tests/payloads/export-flood.sh",
+         ["--max-total", "409600", "--max-files", "8"], check_export),
+    Case("combined/memory-export-console", "RES-001",
+         "tests/payloads/combo-pressure.sh",
+         ["--max-total", "409600", "--max-files", "8"], check_combo),
+]
+
+
+def main():
+    if not os.access("./bin/diodine-run", os.X_OK):
+        print("bin/diodine-run not executable", file=sys.stderr)
+        return 2
+    controls = [c for c in CASES if c.must_fail]
+    if len(CASES) < 4 or len(controls) < 2:
+        print(f"only {len(CASES)} cases ({len(controls)} controls); this run "
+              f"would be vacuous", file=sys.stderr)
+        return 2
+
+    print(f"\033[1mexhaustion corpus: {len(CASES)} cases "
+          f"({len(CASES) - len(controls)} pressure, {len(controls)} control)\033[0m")
+    print("every case asserts a floor as well as a cap, and the controls prove "
+          "those floors can fire\n")
+
+    failed = 0
+    t0 = time.monotonic()
+    for c in CASES:
+        started = time.monotonic()
+        ok, detail, peaks = run_case(c)
+        took = time.monotonic() - started
+        verdict = (not ok) if c.must_fail else ok
+        if verdict:
+            print(f"  \033[32mPASS\033[0m  {c.stmt:<8} {c.cid}")
+            if c.must_fail:
+                print(f"        correctly refused: {detail}  ({took:.0f}s)")
+            else:
+                print(f"        {detail}  ({took:.0f}s)")
+        else:
+            print(f"  \033[31mFAIL\033[0m  {c.stmt:<8} {c.cid}")
+            if c.must_fail:
+                print(f"        the check PASSED a run that applied no pressure.")
+                print(f"        {c.why}  ({took:.0f}s)")
+            else:
+                print(f"        {detail}  ({took:.0f}s)")
+            failed += 1
+
+    print(f"\n{len(CASES) - failed} passed, {failed} failed "
+          f"({time.monotonic() - t0:.0f}s)")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

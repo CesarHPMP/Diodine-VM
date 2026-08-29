@@ -49,8 +49,15 @@ jobs:
         run: python3 --version
       # Not piped into anything. The exit status is the result -- piping a
       # harness into tail once masked a failing status here for a whole session.
-      - name: tests/adversarial/run
-        run: ./tests/adversarial/run
+      #
+      # frames and ingest only. The third suite, `exhaustion`, drives real VMs to
+      # attack the RES caps and needs KVM, a loaded AppArmor profile and cgroup
+      # delegation. Naming the two explicitly is deliberate: the runner could
+      # detect the missing KVM and skip, but a suite that quietly runs two thirds
+      # of itself and reports success is the failure mode this project exists to
+      # avoid. The gap is stated in the "What CI did not verify" job below.
+      - name: tests/adversarial/run frames ingest
+        run: ./tests/adversarial/run frames ingest
 
   scope:
     name: What CI did not verify
@@ -59,8 +66,9 @@ jobs:
     steps:
       - name: State the gap
         run: |
-          echo "::notice title=Not verified by CI::tests/run-checks did NOT run."
-          echo "It requires KVM, a loaded AppArmor profile (diodine-qemu), a"
-          echo "systemd user scope and journal access. A passing CI run says"
-          echo "the tree is well-formed and the adversarial corpora pass. It"
-          echo "says nothing about whether the isolation boundary holds."
+          echo "::notice title=Not verified by CI::tests/run-checks and the"
+          echo "exhaustion corpus did NOT run. Both require KVM, a loaded"
+          echo "AppArmor profile (diodine-qemu), a systemd user scope and cgroup"
+          echo "delegation. A passing CI run says the tree is well-formed and the"
+          echo "framing and ingest corpora pass. It says nothing about whether the"
+          echo "isolation boundary holds, or whether any resource cap is enforced."
