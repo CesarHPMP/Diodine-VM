@@ -5,10 +5,12 @@
 # check mark is exactly the kind of reassuring signal this project keeps finding
 # to be wrong:
 #
-#   CAN   -- the tree parses, builds and carries its licence (tests/lint), and
-#            the adversarial corpora pass (tests/adversarial/run). Those 61 cases
-#            drive the REAL receiver and the REAL ingest binary, so they are
-#            genuine evidence about the two components that parse hostile input.
+#   CAN   -- the tree parses, builds, carries its licence, and the confinement
+#            profile still COMPILES (tests/lint, via apparmor_parser -Q, which
+#            needs no kernel load), and the framing and ingest corpora pass
+#            (tests/adversarial/run). Those 61 cases drive the REAL receiver and
+#            the REAL ingest binary, so they are genuine evidence about the two
+#            components that parse hostile input.
 #
 #   CANNOT -- anything about whether the isolation boundary holds. tests/run-checks
 #            needs KVM, a loaded AppArmor profile, a systemd user scope and journal
@@ -50,12 +52,14 @@ jobs:
       # Not piped into anything. The exit status is the result -- piping a
       # harness into tail once masked a failing status here for a whole session.
       #
-      # frames and ingest only. The third suite, `exhaustion`, drives real VMs to
-      # attack the RES caps and needs KVM, a loaded AppArmor profile and cgroup
-      # delegation. Naming the two explicitly is deliberate: the runner could
-      # detect the missing KVM and skip, but a suite that quietly runs two thirds
-      # of itself and reports success is the failure mode this project exists to
-      # avoid. The gap is stated in the "What CI did not verify" job below.
+      # frames and ingest only. The other two suites need what a runner lacks:
+      # `exhaustion` drives real VMs against the RES caps (KVM + cgroup
+      # delegation), and `confinement` attacks the live AppArmor profile with
+      # aa-exec (the profile must be loaded). Naming the two runnable suites
+      # explicitly is deliberate: the runner could detect the missing KVM/profile
+      # and skip, but a suite that quietly runs half of itself and reports success
+      # is the failure mode this project exists to avoid. The gap is stated in the
+      # "What CI did not verify" job below.
       - name: tests/adversarial/run frames ingest
         run: ./tests/adversarial/run frames ingest
 
@@ -67,8 +71,9 @@ jobs:
       - name: State the gap
         run: |
           echo "::notice title=Not verified by CI::tests/run-checks and the"
-          echo "exhaustion corpus did NOT run. Both require KVM, a loaded"
-          echo "AppArmor profile (diodine-qemu), a systemd user scope and cgroup"
-          echo "delegation. A passing CI run says the tree is well-formed and the"
-          echo "framing and ingest corpora pass. It says nothing about whether the"
-          echo "isolation boundary holds, or whether any resource cap is enforced."
+          echo "exhaustion and confinement corpora did NOT run. They require KVM, a"
+          echo "loaded AppArmor profile (diodine-qemu), a systemd user scope and"
+          echo "cgroup delegation. A passing CI run says the tree is well-formed,"
+          echo "the profile compiles, and the framing and ingest corpora pass. It"
+          echo "says nothing about whether the isolation boundary holds when loaded,"
+          echo "or whether any resource cap is enforced."
