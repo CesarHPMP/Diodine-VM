@@ -98,7 +98,7 @@ No live malware until every line reads **done**.
 | # | condition | status |
 | --- | --- | --- |
 | 1 | W1 — denials visible, or explicitly recorded as unchecked | **done** — `AUD-004`; host needs the one-time `systemd-journal` grant, and `tests/run-checks` fails when it is missing |
-| 2 | W2 — adversarial suite exists, every check demonstrated failing | **done** — 87 cases across framing, ingest, exhaustion and confinement; controls and driven failures throughout. Found `ING-003`, `OUT-004`, `AUD-005`, corrected `RES-003` |
+| 2 | W2 — adversarial suite exists, every check demonstrated failing | **done** — 89 cases across framing, ingest, exhaustion and confinement; controls and driven failures throughout. Found `ING-003`, `OUT-004`, `AUD-005`, corrected `RES-003` |
 | 3 | W5 — results reproduced on a second platform | **open** — see above |
 | 4 | `RES-007` decided, not merely documented | **done** — decided uncapped, `policy.yaml` carries the reasoning |
 | 5 | Not on hardware or a network that matters | **open** — operator judgement, per the existing scope note |
