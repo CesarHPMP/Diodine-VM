@@ -485,9 +485,15 @@ ARGS=(
     -chardev "pipe,id=ivout,path=$PIPE"
     -device virtserialport,chardev=ivout,bus=vser0.0,name=org.diodine.out
 
-    # Guest console -> a host log file. Read-only to the guest's benefit; the
-    # guest cannot read this file back.
-    -chardev "file,id=ivcon,path=$QUARANTINE/console.log"
+    # Guest console -> a host log file in the EPHEMERAL per-run dir, not straight
+    # into quarantine (AUD-005). Writing it to the persistent tree gave the VMM a
+    # write path there, and the profile's owner quarantine/**/console.log grant
+    # spanned every run, so a compromised VMM could truncate any prior run's
+    # console. The host copies this into quarantine at 0400 after the VMM exits,
+    # the same host-authored pattern as MANIFEST.json. Still -chardev file, still
+    # on tmpfs, so RES-007's timing-inertness is unchanged.
+    # Read-only to the guest's benefit; the guest cannot read this file back.
+    -chardev "file,id=ivcon,path=$RUNDIR/console.log"
     -serial chardev:ivcon
 
     -rtc base=utc
@@ -699,6 +705,17 @@ if [ -s "$VMMLOG" ]; then
     fi
 fi
 chmod 0400 "$VMMLOG" 2>/dev/null || true
+
+# AUD-005. Promote the console from the ephemeral run dir into quarantine as a
+# host-authored 0400 record. The VMM wrote it under /run, where the profile
+# scopes it per-run and it is shredded on exit; the launcher (unconfined) is what
+# places it in the persistent tree, so the VMM never had a write path into
+# quarantine at all. Done whether the guest exited cleanly or was killed, so a
+# timed-out run still keeps whatever console it produced.
+if [ -f "$RUNDIR/console.log" ]; then
+    cp "$RUNDIR/console.log" "$QUARANTINE/console.log" 2>/dev/null \
+        && chmod 0400 "$QUARANTINE/console.log" 2>/dev/null || true
+fi
 
 # A nonzero receiver exit is a normal, meaningful outcome -- an enforced cap
 # is a success, not a launcher failure -- so it must not trip `set -e` and

@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 César Henrique Policarpo de Melo
+"""Attack the confinement profile directly -- the hypervisor boundary's host half.
+
+The containment claim -- a compromised guest cannot reach the host -- has two
+links. guest -> QEMU needs a hypervisor 0-day and is inherited platform risk,
+out of scope. QEMU -> host is the AppArmor profile's entire job, and it is
+testable now: if the profile is full of holes, the claim is hollow no matter how
+good KVM is. Nothing had tested it until this corpus.
+
+Method: run a probe UNDER the profile with `aa-exec -p diodine-qemu`, exactly the
+way VMM-002 and AUD-004 already probe by attempted use rather than by reading
+configuration. Each case is what a compromised QEMU would try; the profile must
+refuse the host-sensitive ones and permit only the few it genuinely needs.
+
+Each case is a DIRECT command, never `sh -c "..."`. That is not stylistic. The
+aa-exec ENTRY exec is exempt, but a shell wrapper then needs a SECOND exec to run
+its helper (cat, head, mkdir), and the profile denies every exec it did not name.
+A `sh -c "cat /etc/shadow"` case therefore fails to even run cat and reports
+"denied" -- for the wrong reason, whether or not /etc/shadow was readable. The
+first version of this file did exactly that, and its must-deny half passed
+vacuously; the must-allow half is what exposed it. So file access is probed by
+running the tool AS the entry (its file access is then what the profile checks),
+and writes are probed with dd rather than a shell redirect.
+
+Two-sided, per the Phase 2 rules. A profile that denied EVERYTHING would pass a
+corpus of must-deny cases while being unusable, so the must-allow half asserts the
+VMM can still reach what it needs to boot. A corpus of only must-deny cases is
+also how you fail to notice you have broken the product.
+
+Requires the profile LOADED (sudo policy/apparmor/install), like the exhaustion
+corpus requires KVM. It is not in the CI subset for that reason.
+"""
+
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(HERE))
+os.chdir(ROOT)
+
+PROFILE = "diodine-qemu"
+
+
+def confined(argv):
+    """True if the command SUCCEEDED under the profile."""
+    try:
+        r = subprocess.run(["aa-exec", "-p", PROFILE, "--"] + argv,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=15)
+        return r.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+
+def profile_loaded():
+    return confined(["/bin/true"])
+
+
+class Case:
+    def __init__(self, cid, stmt, want, argv, note=None):
+        self.cid, self.stmt, self.want, self.argv = cid, stmt, want, argv
+        self.note = note
+
+
+def read_(path):
+    # cat AS the entry: its own read is what the profile checks.
+    return ["cat", path]
+
+
+def write_(path):
+    # dd AS the entry, O_WRONLY|O_CREAT without O_TRUNC, one byte. Proves the
+    # profile grants a WRITE open on this path.
+    return ["dd", "if=/dev/zero", f"of={path}", "bs=1", "count=1", "conv=notrunc"]
+
+
+def build(target_run):
+    home = os.path.expanduser("~")
+    clog = os.path.join(target_run, "console.log")
+    manifest = os.path.join(target_run, "MANIFEST.json")
+
+    C = []
+    A = C.append
+
+    # ---- must DENY: host confidentiality -----------------------------------
+    A(Case("secrets/etc-shadow", "VMM-002", "deny", read_("/etc/shadow")))
+    A(Case("secrets/etc-passwd", "VMM-002", "deny", read_("/etc/passwd")))
+    A(Case("secrets/ssh-key", "VMM-002", "deny", read_(f"{home}/.ssh/id_rsa")))
+    A(Case("secrets/bash-history", "VMM-002", "deny", read_(f"{home}/.bash_history")))
+
+    # ---- must DENY: integrity of the source tree (persistence) --------------
+    A(Case("persist/launcher", "TCB-001", "deny", write_("bin/diodine-run")))
+    A(Case("persist/payload", "TCB-001", "deny", write_("tests/payloads/probe.sh")))
+    A(Case("persist/profile-template", "VMM-002", "deny",
+           write_("policy/apparmor/diodine-qemu.in")))
+
+    # ---- must DENY: base image immutability (FS-003) ------------------------
+    A(Case("baseimg/write-vmlinuz", "FS-003", "deny", write_("image/base/vmlinuz")))
+    A(Case("baseimg/write-initramfs", "FS-003", "deny", write_("image/base/initramfs")))
+
+    # ---- must DENY: cross-run record integrity (AUD-005) --------------------
+    # THE finding. A compromised VMM must not be able to write another run's
+    # console at all -- the target here is a throwaway run this corpus created,
+    # never real output.
+    A(Case("crossrun/write-prior-console", "AUD-005", "deny", write_(clog),
+           note="a compromised VMM writing a completed run's console log"))
+    A(Case("crossrun/read-prior-manifest", "AUD-002", "deny", read_(manifest)))
+    A(Case("crossrun/new-file-in-quarantine", "AUD-005", "deny",
+           write_("quarantine/EVIL.txt")))
+    A(Case("crossrun/mkdir-in-quarantine", "AUD-005", "deny",
+           ["mkdir", "quarantine/FAKE-RUN"]))
+
+    # ---- must DENY: reach into processes / the network ---------------------
+    A(Case("proc/environ-self", "VMM-001", "deny", read_("/proc/self/environ")))
+    if shutil.which("bash"):
+        # bash AS the entry; /dev/tcp is internal to bash, so no second exec, and
+        # the connect is what `deny network` must stop.
+        A(Case("net/open-socket", "NET-002", "deny",
+               ["bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/22"]))
+
+    # ---- must ALLOW: what the VMM genuinely needs to boot ------------------
+    A(Case("need/read-urandom", "DEV-005", "allow",
+           ["dd", "if=/dev/urandom", "of=/dev/null", "bs=1", "count=1"]))
+    A(Case("need/read-base-vmlinuz", "FS-003", "allow",
+           ["dd", "if=image/base/vmlinuz", "of=/dev/null", "bs=1", "count=1"]))
+    A(Case("need/read-base-initramfs", "FS-003", "allow",
+           ["dd", "if=image/base/initramfs", "of=/dev/null", "bs=1", "count=1"]))
+    A(Case("need/create-own-runtime-dir", "AUD-005", "allow",
+           ["mkdir", "-p", f"/run/user/{os.getuid()}/diodine/probe.{os.getpid()}"]))
+    return C
+
+
+def run(c):
+    got = "allow" if confined(c.argv) else "deny"
+    return got == c.want, got
+
+
+def main():
+    if shutil.which("aa-exec") is None:
+        print("aa-exec not present; cannot probe the profile", file=sys.stderr)
+        return 2
+    if not profile_loaded():
+        print(f"profile {PROFILE} is not loaded; run: sudo policy/apparmor/install",
+              file=sys.stderr)
+        return 2
+
+    # A throwaway run to attack, so no real output is ever touched. Created with
+    # normal (unconfined) file ops, exactly as the launcher would author a run.
+    os.makedirs("quarantine", exist_ok=True)
+    target = tempfile.mkdtemp(prefix="CONFINEMENT-PROBE.", dir="quarantine")
+    with open(os.path.join(target, "console.log"), "w") as fh:
+        fh.write("REAL PRIOR-RUN CONSOLE -- must survive\n")
+    with open(os.path.join(target, "MANIFEST.json"), "w") as fh:
+        fh.write('{"real": true}\n')
+    baseline = open(os.path.join(target, "console.log")).read()
+
+    cases = build(target)
+    denies = [c for c in cases if c.want == "deny"]
+    allows = [c for c in cases if c.want == "allow"]
+    # Lower bounds: a corpus that lost either half is not evidence.
+    if len(denies) < 10 or len(allows) < 4:
+        print(f"corpus too small: {len(denies)} deny, {len(allows)} allow; vacuous",
+              file=sys.stderr)
+        return 2
+
+    print(f"\033[1mconfinement corpus: {len(cases)} cases "
+          f"({len(denies)} must-deny, {len(allows)} must-allow) vs the live "
+          f"{PROFILE} profile\033[0m")
+
+    failed, notes = 0, []
+    for c in cases:
+        ok, got = run(c)
+        tag = "\033[32mPASS\033[0m" if ok else "\033[31mFAIL\033[0m"
+        arrow = "refused" if c.want == "deny" else "permitted"
+        print(f"  {tag}  {c.stmt:<8} {c.cid}")
+        if not ok:
+            print(f"        wanted {c.want}, profile {got.upper()} it "
+                  f"-- must be {arrow}")
+            failed += 1
+        if c.note and not ok:
+            notes.append((c.cid, c.note))
+
+    # A denied write must have changed nothing. If the target console differs
+    # from its baseline, some case wrote to it and the deny was not real.
+    if open(os.path.join(target, "console.log")).read() != baseline:
+        print("  \033[31mFAIL\033[0m  AUD-005  the throwaway console was modified "
+              "despite the deny verdicts")
+        failed += 1
+    # Clean up: the throwaway run and anything a partial write left behind.
+    shutil.rmtree(target, ignore_errors=True)
+    for junk in ("quarantine/EVIL.txt", "quarantine/FAKE-RUN"):
+        if os.path.exists(junk):
+            (shutil.rmtree if os.path.isdir(junk) else os.unlink)(junk)
+
+    print(f"\n{len(cases) - failed} passed, {failed} failed")
+    if notes:
+        print("\n\033[1mwhat the failures mean:\033[0m")
+        for cid, n in notes:
+            print(f"  * {cid}: {n}")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
