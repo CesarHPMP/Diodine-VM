@@ -518,7 +518,7 @@ EXEMPT_RE='^(NET-002|OUT-002|PLAT-001)$'
 # ok/bad. The matched set is printed rather than just counted -- an over-broad
 # regex here would make coverage look complete, which is the one direction this
 # check cannot fail safely in, and a human reading the list will see it.
-ADV_FILES="tests/adversarial/frames tests/adversarial/ingest tests/adversarial/exhaustion"
+ADV_FILES="tests/adversarial/frames tests/adversarial/ingest tests/adversarial/exhaustion tests/adversarial/confinement"
 adversarial_ids() { grep -ohE '"[A-Z][A-Z0-9]*-[0-9]{3}"' $ADV_FILES 2>/dev/null \
                       | tr -d '"' | sort -u; }
 covered_ids() { cat <(harness_ids "$1") <(adversarial_ids) | sort -u; }

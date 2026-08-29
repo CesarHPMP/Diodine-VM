@@ -54,9 +54,12 @@ profile diodine-qemu flags=(attach_disconnected) {
   owner /run/user/[0-9]*/diodine/**               rw,
   owner /tmp/diodine/**                           rw,
 
-  # --- the console log, write-only ----------------------------------------
-  # QEMU appends the guest console here. It is never read back by the guest.
-  owner @DIODINE_ROOT@/quarantine/**/console.log  w,
+  # --- NO write path into quarantine (AUD-005) -----------------------------
+  # QEMU used to append the console straight to quarantine/<run>/console.log, but
+  # that grant's ** spanned every run, so a compromised VMM could truncate any
+  # prior run's console. The console now goes to the per-run dir under /run
+  # (granted below), and the host copies it into quarantine after the VMM exits.
+  # The VMM has no write access to the persistent tree at all.
 
   # --- host introspection QEMU needs to start ------------------------------
   @{PROC}/@{pid}/task/@{tid}/comm       rw,

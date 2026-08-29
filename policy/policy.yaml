@@ -605,6 +605,46 @@ policy:
       and tests/run-checks drives that case directly -- a leftover file with a
       dead service must be refused.
 
+  - id: AUD-005
+    claim: A compromised VMM cannot reach the run records of any other run, and
+           has no write path into the quarantine tree at all.
+    enforced_by: the guest console is written to the ephemeral per-run directory
+                 under /run, which the confinement profile scopes per run and
+                 which is shredded on exit; the launcher, not the VMM, copies it
+                 into quarantine at mode 0400 after the VMM has exited. The
+                 profile grants the VMM no write access to the quarantine tree
+    verify: tests/adversarial/confinement drives aa-exec against the live profile
+            -- a write to another run's console.log must be refused, and a
+            throwaway run's console is compared byte-for-byte afterwards so a
+            refusal that did not actually refuse is caught
+    status: enforced
+    note: |
+      Found by attacking the profile directly rather than by reading it. The
+      containment claim has two links: guest -> VMM needs a hypervisor 0-day and
+      is inherited platform risk, but VMM -> host is entirely this profile's job,
+      and nothing had tested it.
+
+      The profile granted `owner @DIODINE_ROOT@/quarantine/**/console.log w` so
+      QEMU could append the console itself. That glob spans EVERY run, not the
+      current one, so a compromised VMM in one run could truncate or rewrite the
+      console log of every completed analysis -- anti-forensics against exactly
+      the evidence someone would come back for. AUD-002 protected a run's records
+      from its own guest; nobody had checked a compromised VMM against OTHER runs.
+
+      Fixed structurally rather than by narrowing the glob. A per-run path in the
+      profile would have to be generated per run, and the profile is loaded once,
+      so the pattern would stay wide. Instead the VMM writes the console where it
+      already writes everything else -- the ephemeral run directory, which the
+      existing `owner /run/user/[0-9]*/diodine/**` rule scopes and which is
+      shredded on exit -- and the host promotes it to quarantine at 0400
+      afterwards, the same host-authored pattern MANIFEST.json already follows.
+      The VMM now has no write path into the persistent tree, so there is no glob
+      to get wrong.
+
+      RES-007 is unaffected: it is still -chardev file, still never blocking QEMU,
+      so the console carries no backpressure and no OUT-002-style timing channel.
+      Only the destination changed.
+
   - id: VMM-001
     claim: The VMM process runs unprivileged and under a seccomp sandbox.
     enforced_by: no sudo anywhere in the launcher; qemu -sandbox on with

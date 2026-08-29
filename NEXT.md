@@ -9,7 +9,7 @@ and what has to be true before live samples are allowed anywhere near it.
 | workstream | status |
 | --- | --- |
 | **W1** denial visibility | **done** — `AUD-004`. Journal-anchored, unprivileged, availability decided by live read. The launcher records; `tests/run-checks` fails when blind. |
-| **W2** adversarial suite | **done** — `tests/adversarial/`, 68 cases: framing, ingest, and exhaustion. Found `ING-003`, `OUT-004`, and corrected `RES-003`. |
+| **W2** adversarial suite | **done** — `tests/adversarial/`, 87 cases: framing, ingest, exhaustion, and confinement. Found `ING-003`, `OUT-004`, `AUD-005`, and corrected `RES-003`. |
 | **W3** `RES-007` | **decided** — console stays uncapped; `policy.yaml` carries the reasoning, and it is no longer filed as a gap. |
 | W4 `OUT-002` deeper | deferred → `BACKLOG.md` |
 | W5 portability | deferred → `BACKLOG.md`. Host provenance now lands in `RUN.json` so existing numbers stay attributable. |
@@ -226,6 +226,42 @@ followed by a second, well-formed sender on the same stream. The framing corpus
 sidesteps this by driving the receiver directly, which covers the parsing surface;
 what an in-VM version would add is the *guest-side* emitter's behaviour, and that
 confound has to be solved first.
+
+**The hypervisor boundary, host half.** `tests/adversarial/confinement` — 19
+cases attacking the AppArmor profile directly with `aa-exec -p diodine-qemu`,
+each case what a compromised QEMU would try. The containment claim has two links:
+guest → QEMU needs a hypervisor 0-day and is inherited platform risk, out of
+scope; QEMU → host is entirely this profile's job, and nothing had tested it. The
+corpus is two-sided — 15 host-sensitive reads/writes that must be refused, 4 the
+VMM genuinely needs to boot that must be permitted — because a profile that
+denied everything would sweep a must-deny corpus clean while being unusable.
+
+It found `AUD-005`. The profile granted `owner @DIODINE_ROOT@/quarantine/**/console.log w`
+so QEMU could append its own console, but that glob spans *every* run, not the
+current one, so a compromised VMM could truncate or rewrite the console of every
+completed analysis — anti-forensics against exactly the evidence someone comes
+back for. `AUD-002` had protected a run's records from its own guest; nobody had
+checked a compromised VMM against *other* runs. Fixed structurally, not by
+narrowing the glob (a per-run path can't be baked into a once-loaded profile):
+QEMU now writes the console to the ephemeral per-run dir under `/run`, which the
+existing `owner /run/user/[0-9]*/diodine/**` rule already scopes and which is
+shredded on exit, and the launcher promotes it to quarantine at `0400` after QEMU
+exits — the same host-authored pattern `MANIFEST.json` follows. The VMM now has
+no write path into the persistent tree at all, so there is no glob to get wrong.
+`RES-007` is unaffected: still `-chardev file`, still non-blocking, only the
+destination changed.
+
+Building it reproduced the Phase 1 lesson once more. The first version wrapped
+each probe in `sh -c "..."`, but `aa-exec`'s entry exec is exempt while the shell
+then needs a *second* exec to run its helper, which the profile denies — so every
+must-deny case reported "denied" for the wrong reason and passed vacuously. The
+must-allow half is what exposed it. The corpus now runs each tool as the entry
+itself, and closes with a byte-for-byte comparison of a throwaway run's console
+against its baseline, so a refusal that did not actually refuse is still caught.
+
+Like `exhaustion`, `confinement` needs the loaded profile, so CI does not run it;
+it is in the default `tests/adversarial/run` set and, when the loaded profile is
+stale, it *fails* rather than skips — the same explicit-selection rule.
 
 ### W3 — `RES-007`, and the trade-off it forces
 

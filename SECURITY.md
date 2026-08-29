@@ -48,7 +48,8 @@ Concretely, that includes:
 - Escaping `diodine-ingest`'s destination directory, or defeating its bounds
   (`ING-001`, `ING-002`).
 - Forging, replacing, or suppressing a host-authored record of a run
-  (`AUD-002`, `AUD-004`, `OUT-004`), or defeating expansion attribution
+  (`AUD-002`, `AUD-004`, `OUT-004`), reaching or rewriting *another* run's
+  records from a compromised VMM (`AUD-005`), or defeating expansion attribution
   (`ING-003`).
 - Escaping or evading the resource caps (`RES-001`…`RES-006`).
 - Defeating the VMM confinement profile, or making a run report itself confined

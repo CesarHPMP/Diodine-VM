@@ -164,6 +164,16 @@ in it. A guest forking 300 times leaves the host counter at `pids.peak` 4 agains
 a cap of 64 — unchanged from idle. The statement now says what is true, and the
 real host-side property (a runaway VMM cannot exhaust host PIDs) is unaffected.
 
+The VMM→host boundary is verified the same way — by attempted use, not by reading
+config — in `tests/adversarial/confinement`, which drives `aa-exec -p diodine-qemu`
+with what a compromised QEMU would try: host secrets, the source tree, the base
+image, and other runs' records must be refused; the handful of paths the VMM needs
+to boot must be permitted. It found `AUD-005`: the profile let QEMU write the
+console into `quarantine/**/console.log`, whose glob spanned *every* run, so a
+compromised VMM could truncate any completed analysis's console. The console now
+goes to the ephemeral per-run dir and the host promotes it to quarantine at `0400`
+afterwards; the VMM has no write path into the persistent tree at all.
+
 Known gaps, all recorded in `policy/policy.yaml`:
 
 | ID | Gap |
@@ -197,7 +207,7 @@ guest/init              guest PID 1
 guest/diodine-send      guest-side artifact emitter
 image/build-base-image  builds the RAM-only Alpine base
 tests/run-checks        verification harness, keyed to policy IDs
-tests/adversarial/      hostile inputs: frames, ingest, exhaustion
+tests/adversarial/      hostile inputs: frames, ingest, exhaustion, confinement
 tests/lint              static hygiene; the part CI can run
 .github/workflows/      CI and CodeQL
 quarantine/             untrusted output (gitignored)

@@ -37,7 +37,7 @@ cd "$ROOT"
 # noticed KVM was missing and quietly skipped the VM half would report "all
 # suites passed" for a third of the work, which is the reassuring-failure shape
 # this project keeps finding. If a named suite cannot run, it fails.
-SUITES=(frames ingest exhaustion)
+SUITES=(frames ingest confinement exhaustion)
 [ "$#" -gt 0 ] && SUITES=("$@")
 RAN=0; FAILED=0
 
