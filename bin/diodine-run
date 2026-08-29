@@ -712,10 +712,19 @@ chmod 0400 "$VMMLOG" 2>/dev/null || true
 # places it in the persistent tree, so the VMM never had a write path into
 # quarantine at all. Done whether the guest exited cleanly or was killed, so a
 # timed-out run still keeps whatever console it produced.
-if [ -f "$RUNDIR/console.log" ]; then
-    cp "$RUNDIR/console.log" "$QUARANTINE/console.log" 2>/dev/null \
-        && chmod 0400 "$QUARANTINE/console.log" 2>/dev/null || true
-fi
+#
+# The copy is delegated to diodine-promote-console because it is a confused-deputy
+# target: QEMU can swap its console file for a symlink at a host secret, and a
+# naive copy here would dereference it on the VMM's behalf. The helper refuses
+# anything that is not a plain single-link regular file and records the tamper in
+# the console's place; a refusal must not fail the run, so its status is logged,
+# not propagated.
+PROMRC=0
+"$HERE/diodine-promote-console" "$RUNDIR/console.log" "$QUARANTINE/console.log" \
+    || PROMRC=$?
+case "$PROMRC" in
+    3) say "console withheld: run-dir console.log was tampered (symlink/non-file); recorded in the console record (AUD-005)" ;;
+esac
 
 # A nonzero receiver exit is a normal, meaningful outcome -- an enforced cap
 # is a success, not a launcher failure -- so it must not trip `set -e` and

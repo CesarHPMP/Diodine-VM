@@ -172,7 +172,13 @@ to boot must be permitted. It found `AUD-005`: the profile let QEMU write the
 console into `quarantine/**/console.log`, whose glob spanned *every* run, so a
 compromised VMM could truncate any completed analysis's console. The console now
 goes to the ephemeral per-run dir and the host promotes it to quarantine at `0400`
-afterwards; the VMM has no write path into the persistent tree at all.
+afterwards; the VMM has no write path into the persistent tree at all. That
+promotion is itself a confused-deputy target — a compromised VMM can swap its
+console file for a symlink at a host secret and let the unconfined launcher copy
+it out — so the copy goes through `bin/diodine-promote-console`, which promotes
+only a plain single-link regular file and refuses anything else. The corpus drives
+that helper directly, and it was demonstrated leaking a planted secret under a
+naive `cp` before the fix.
 
 Known gaps, all recorded in `policy/policy.yaml`:
 
@@ -203,6 +209,7 @@ policy/apparmor/        VMM confinement profile and installer
 bin/diodine-run         hardened launcher; the QEMU args ARE the policy
 bin/diodine-receiver    host-side output receiver; parses nothing
 bin/diodine-ingest      bounded decompression; the only thing that parses
+bin/diodine-promote-console  copies the console into quarantine, symlink-safe (AUD-005)
 guest/init              guest PID 1
 guest/diodine-send      guest-side artifact emitter
 image/build-base-image  builds the RAM-only Alpine base

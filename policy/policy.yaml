@@ -606,17 +606,23 @@ policy:
       dead service must be refused.
 
   - id: AUD-005
-    claim: A compromised VMM cannot reach the run records of any other run, and
-           has no write path into the quarantine tree at all.
+    claim: A compromised VMM cannot reach the run records of any other run, has no
+           write path into the quarantine tree at all, and cannot use the console
+           promotion to make the launcher read a host file on its behalf.
     enforced_by: the guest console is written to the ephemeral per-run directory
                  under /run, which the confinement profile scopes per run and
                  which is shredded on exit; the launcher, not the VMM, copies it
-                 into quarantine at mode 0400 after the VMM has exited. The
-                 profile grants the VMM no write access to the quarantine tree
+                 into quarantine at mode 0400 after the VMM has exited, via
+                 bin/diodine-promote-console, which refuses to promote anything
+                 that is not a single-link regular file so a planted symlink is
+                 never dereferenced. The profile grants the VMM no write access to
+                 the quarantine tree
     verify: tests/adversarial/confinement drives aa-exec against the live profile
             -- a write to another run's console.log must be refused, and a
             throwaway run's console is compared byte-for-byte afterwards so a
-            refusal that did not actually refuse is caught
+            refusal that did not actually refuse is caught -- and then drives the
+            real diodine-promote-console helper with a symlink at a secret,
+            asserting the secret is never copied out while an honest file still is
     status: enforced
     note: |
       Found by attacking the profile directly rather than by reading it. The
@@ -644,6 +650,18 @@ policy:
       RES-007 is unaffected: it is still -chardev file, still never blocking QEMU,
       so the console carries no backpressure and no OUT-002-style timing channel.
       Only the destination changed.
+
+      That fix had its own tail, found the same way -- by attacking it. Moving the
+      copy into the unconfined launcher made it a confused deputy: QEMU has rw on
+      its run dir, so a compromised VMM can unlink the console file it created and
+      drop a symlink at a host secret the profile forbade it to read, and a naive
+      cp would dereference it, reading with the launcher's access exactly what the
+      profile's deny existed to stop. The copy now goes through
+      bin/diodine-promote-console, which promotes only a plain single-link regular
+      file (QEMU has exited by then, so no symlink race), refuses anything else,
+      and records the refusal in the console's place rather than dropping it. The
+      hardlink variant is blocked already -- EXDEV across filesystems and the
+      profile's path scope -- but the single-link check closes it regardless.
 
   - id: VMM-001
     claim: The VMM process runs unprivileged and under a seccomp sandbox.
